@@ -27,6 +27,26 @@ OCR_LANG = os.getenv("OCR_LANG", "korean")
 # default so the benchmark measures detection + recognition only.
 USE_TEXTLINE_ORIENTATION = os.getenv("OCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
 
+# oneDNN, paddle's CPU acceleration library. Off by default because paddle
+# 3.3.1's PIR executor cannot run the oneDNN kernels this pipeline builds:
+#   NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
+#   not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+#     at .../new_executor/instruction/onednn/onednn_instruction.cc:116
+# Engine creation and model loading both succeed; it fails on the first
+# predict(), so /health and even /ready look fine while every /ocr returns 500.
+#
+# PaddleOCR defaults this to True, so leaving it alone means no CPU inference
+# at all. Turning it off costs CPU speed and GPU is unaffected, so the CPU
+# baseline is "without oneDNN" - state that with any CPU-vs-GPU number.
+ENABLE_MKLDNN = os.getenv("OCR_ENABLE_MKLDNN", "false").lower() == "true"
+
+# Paddle's own thread count, separate from OMP_NUM_THREADS. PaddleOCR defaults
+# it to 10 with no regard for the container's CPU limit, so a pod limited to
+# 2 cores runs 10 threads that fight each other - which shows up as unstable
+# latency, exactly what a benchmark must not have. Keep this in step with the
+# CPU limit in deployment.yaml.
+CPU_THREADS = max(1, int(os.getenv("OCR_CPU_THREADS", "2")))
+
 # A PaddleOCR predictor is not thread-safe. This caps how many predict() calls
 # may run against the shared engine at once:
 #   1 -> safe default, one GPU stream per pod (scale with replicas)
@@ -53,21 +73,29 @@ def create_ocr_engine():
 
     device = resolve_device()
     logger.info(
-        "initializing PaddleOCR (device=%s, lang=%s, textline_orientation=%s, max_concurrency=%d)",
+        "initializing PaddleOCR (device=%s, lang=%s, textline_orientation=%s, "
+        "max_concurrency=%d, mkldnn=%s, cpu_threads=%d)",
         device,
         OCR_LANG,
         USE_TEXTLINE_ORIENTATION,
         MAX_CONCURRENCY,
+        ENABLE_MKLDNN,
+        CPU_THREADS,
     )
 
     # Document orientation / unwarping are extra pipeline stages we do not need
     # for a benchmark workload; disabling them keeps runs comparable.
+    # enable_mkldnn / cpu_threads reach PaddleOCR through **kwargs, which it
+    # forwards to PaddleX. Both are ignored when the device is a GPU, so the
+    # GPU image can share these lines unchanged.
     engine = PaddleOCR(
         device=device,
         lang=OCR_LANG,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
+        enable_mkldnn=ENABLE_MKLDNN,
+        cpu_threads=CPU_THREADS,
     )
     logger.info("PaddleOCR ready on %s", device)
     return engine

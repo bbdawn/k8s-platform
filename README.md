@@ -17,8 +17,8 @@ workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지
 | CPU 환경 검증 | ✅ 완료 (수치는 8장) |
 | 업로드 UI (정적 HTML) | ✅ 완료 |
 | Dockerfile (CPU) | ✅ 작성 완료 — 빌드는 **amd64 리눅스에서만** 가능 (4.1) |
-| Kubernetes 매니페스트 | ✅ 작성 완료 — 아직 클러스터에 적용 안 함 |
-| CPU 클러스터 배포 | ❌ 미착수 |
+| Kubernetes 매니페스트 | ✅ 적용 완료 |
+| CPU 클러스터 배포 | ✅ 파드 Running — 추론 검증은 재배포 후 (4.7) |
 | GPU(A100) 검증 | ❌ 미착수 — **아직 한 번도 GPU에서 실행된 적 없음** |
 | 4개 모드 벤치마크 | ❌ 미착수 |
 
@@ -175,6 +175,8 @@ ConfigMap으로 분리하기 쉽도록 모든 설정을 환경변수로 뺐다.
 | `OCR_WARMUP` | `true` | 시작 시 워밍업 추론 |
 | `OCR_MAX_IMAGE_BYTES` | `10485760` | 업로드 크기 제한 |
 | `OCR_USE_TEXTLINE_ORIENTATION` | `false` | 방향 분류. 측정 일관성을 위해 off |
+| `OCR_ENABLE_MKLDNN` | `false` | oneDNN. **켜면 CPU 추론이 죽는다** (7장) |
+| `OCR_CPU_THREADS` | `2` | paddle `cpu_threads`. CPU limit과 맞출 것 |
 | `LOG_LEVEL` | `INFO` | 로그 레벨 |
 
 ---
@@ -339,6 +341,77 @@ kubectl -n ocr-bench create secret docker-registry nexus-cred \
 > `http: server gave HTTP response to HTTPS client`가 보이면 이 경우다.
 > 현재는 레지스트리를 쓰지 않으므로 이 절은 참고용이다. 4.2를 볼 것.
 
+### 4.7 클러스터 배포에서 실제로 겪은 것 (2026-09-14)
+
+맥에서 이미지까지 만들고 worker1에서 다시 빌드해 배포한 기록. 순서대로 걸렸다.
+
+**빌드 도구가 노드에 없다.** kubeadm 노드에는 `ctr`만 있고 이미지를 빌드할 수
+없다. nerdctl-full이나 docker를 넣으면 번들에 containerd가 딸려 와 돌고 있는
+클러스터 런타임과 충돌할 위험이 있다. **buildkit만 단독으로** 넣는 것이 가장
+안전하다 — 바이너리가 `buildkitd`/`buildctl`뿐이고 containerd를 건드리지 않는다.
+
+```bash
+# /usr/local 에 풀기 전에 bin/containerd 가 없는지 확인할 것
+tar tzf buildkit-v0.33.0.linux-amd64.tar.gz
+tar Cxzf /usr/local buildkit-v0.33.0.linux-amd64.tar.gz
+```
+
+`--containerd-worker-namespace` 플래그는 **없다.** 네임스페이스는 설정 파일로
+지정한다. 이게 빠지면 빌드는 성공하는데 kubelet이 이미지를 못 찾는다.
+
+```toml
+# /etc/buildkit/buildkitd.toml
+[worker.oci]
+  enabled = false
+[worker.containerd]
+  enabled = true
+  namespace = "k8s.io"
+```
+
+```bash
+nohup buildkitd > /var/log/buildkitd.log 2>&1 &
+buildctl debug workers -v      # namespace:k8s.io 라벨을 확인
+buildctl build --frontend dockerfile.v0 \
+  --local context=workloads/inference --local dockerfile=workloads/inference \
+  --output type=image,name=docker.io/library/ocr-workload:0.1.0-cpu --progress plain
+```
+
+`buildkitd`는 `nohup`으로 띄운 포그라운드 프로세스라 **재부팅하면 죽는다.**
+재빌드할 때마다 `pgrep -a buildkitd`로 확인할 것.
+
+**`runAsUser`와 이미지가 어긋나 있었다.** 빌드는 root로 돌아 모델이
+`/root/.paddlex`(권한 700)에 구워지는데 런타임은 UID 10001이다. 그 UID는
+이미지의 `/etc/passwd`에 없어서 `HOME`이 `/`가 되고, paddlex가 `/.paddlex`에
+쓰려다 `PermissionError`로 죽었다. Dockerfile에서 `HOME`을 고정하고 굽고 나서
+`chown`으로 넘기고 `USER`를 박아 해결했다. `USER`를 이미지에 박은 것이 핵심이다
+— 그러지 않으면 같은 문제가 클러스터에서만 드러난다.
+
+**probe 3개가 모두 `/health`를 보고 있었다.** `/health`는 엔진 상태를 보지 않아
+엔진이 죽은 파드가 Ready로 서고 Service가 트래픽을 보냈다. `rollout status`가
+몇 초에 끝난 것이 신호였다 — 모델 로드에 수십 초가 드는데 기다릴 것이 없었다.
+`/ready`를 만들어 startup·readiness에 걸고, liveness는 `/health`로 남겼다.
+liveness를 `/ready`로 걸면 초기화 실패 시 무한 재시작에 빠져 원인을 못 본다.
+
+**재배포가 교착됐다.** `nodeSelector`로 파드를 한 노드에 고정해 놓고 기본
+`RollingUpdate`를 쓰면, 새 파드가 그 노드에 두 번째 몫을 요구해 `Pending`이
+되고 예전 파드는 새 파드를 기다려 아무것도 진행되지 않는다.
+
+```
+0/3 nodes are available: 1 Insufficient cpu, 1 Insufficient memory,
+  1 node(s) didn't match Pod's node affinity/selector,
+  1 node(s) had untolerated taint(s).
+```
+
+`strategy: Recreate`로 해결했다. 무중단이 필요 없고, 측정 대상 노드에서 워크로드
+두 개가 잠시라도 CPU를 나눠 쓰는 편이 오히려 해롭다.
+
+**라이브러리 설정은 파드 안에서 먼저 시험했다.** 재빌드가 5~10분이라 추측으로
+고치면 그만큼을 반복한다. 돌고 있는 파드에서 `kubectl exec`로 엔진을 하나 더
+만들어 빈 이미지로 `predict()`까지 돌려 보면 30초에 답이 나온다. `predict()`는
+지연 평가라 `list()`로 감싸지 않으면 추론이 돌지 않고 통과한 것처럼 보인다.
+
+---
+
 ## 5. 벤치마크 설계
 
 ### 5.1 GPU 공유 방식별 특성
@@ -456,6 +529,30 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
   이 경로가 기동 시간과 이미지 크기에 직접 영향을 준다.
 - OCR 엔진 초기화가 실패해도 앱은 뜬다. `/gpu`가 원인을 노출하고 `/ocr`은 503을
   반환한다. CrashLoopBackOff 대신 원인이 보이도록 한 의도적 설계다.
+- **oneDNN을 켜면 CPU 추론이 전부 실패한다.** paddle 3.3.1의 PIR 실행기가 이
+  파이프라인이 만드는 oneDNN 커널을 처리하지 못한다.
+
+  ```
+  NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
+    not support [pir::ArrayAttribute<pir::DoubleAttribute>]
+    (at .../new_executor/instruction/onednn/onednn_instruction.cc:116)
+  ```
+
+  PaddleOCR 기본값이 `enable_mkldnn=True`라서, 그대로 두면 CPU 추론이 아예
+  안 된다. `OCR_ENABLE_MKLDNN=false`가 기본값인 이유다.
+
+  **이것이 CPU 수치에 미치는 영향을 반드시 같이 적어야 한다.** oneDNN은 CPU 추론
+  가속 라이브러리이므로 끄면 CPU가 느려지고, GPU 경로는 영향을 받지 않는다.
+  즉 CPU/GPU 비교의 CPU 쪽은 **"가속을 끈 CPU"** 값이다. paddle을 올려 고쳐지면
+  다시 측정해 비교할 것.
+
+  엔진 생성과 모델 로드는 성공하고 첫 `predict()`에서 죽는다. 그래서 `/health`도
+  `/ready`도 통과하는데 `/ocr`만 500이 된다 — 파드가 Ready인 것이 추론 가능을
+  뜻하지 않는 경우다.
+- **스레드 수를 두 군데서 맞춰야 한다.** `OMP_NUM_THREADS`(OpenMP)와 paddle 자체의
+  `cpu_threads`는 별개다. 후자의 PaddleOCR 기본값이 **10**이라 컨테이너의 CPU
+  limit과 무관하게 스레드 10개가 뜬다. 2코어 파드에서 서로 밀어내면 지연이
+  불안정해져 벤치마크의 재현성이 떨어진다. 둘 다 CPU limit에 맞출 것.
 
 ---
 

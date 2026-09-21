@@ -6,6 +6,16 @@ metadata:
     app: ocr
 spec:
   replicas: 1
+  # Recreate, not the default RollingUpdate. RollingUpdate starts the new pod
+  # before retiring the old one, but nodeSelector pins both to the same node,
+  # so the replacement asks that node for a second cpu:1/memory:2Gi it does not
+  # have. The new pod stays Pending, the old one waits for it to become Ready,
+  # and the rollout deadlocks - a 2-core worker hit this on the first redeploy:
+  #   0/3 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, ...
+  # Zero-downtime is worthless here anyway, and two copies of the workload
+  # briefly sharing the measured node's CPU would be actively harmful.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: ocr

@@ -16,8 +16,16 @@ data:
   OCR_USE_TEXTLINE_ORIENTATION: "false"
   LOG_LEVEL: "INFO"
 
-  # Paddle's CPU kernels spawn OpenMP threads based on the host core count,
-  # not the container's CPU limit. Left unset, a pod limited to 2 cores still
-  # starts dozens of threads and thrashes. Keep this in step with the CPU
-  # limit in deployment.yaml.
+  # oneDNN off: paddle 3.3.1's PIR executor cannot run the oneDNN kernels this
+  # pipeline builds and every predict() dies with NotImplementedError
+  # (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc:116). CPU
+  # numbers measured here are therefore "without oneDNN" - see README 7.
+  OCR_ENABLE_MKLDNN: "false"
+
+  # Two thread counts, two different layers. Both must match the CPU limit in
+  # deployment.yaml or a 2-core pod runs ~10 threads that fight each other.
+  #   OMP_NUM_THREADS  OpenMP, used by paddle's CPU kernels. Defaults to the
+  #                    host core count, not the container's limit.
+  #   OCR_CPU_THREADS  paddle's own cpu_threads. PaddleOCR defaults it to 10.
   OMP_NUM_THREADS: "2"
+  OCR_CPU_THREADS: "2"
