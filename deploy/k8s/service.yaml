@@ -5,8 +5,8 @@ metadata:
   labels:
     app: ocr
 spec:
-  # NodePort rather than ClusterIP: it is reachable at <nodeIP>:30800 for a
-  # quick look, and kubectl port-forward still works against it unchanged.
+  # ClusterIP가 아니라 NodePort다. <노드IP>:30800으로 바로 열어 볼 수 있고,
+  # kubectl port-forward도 그대로 쓸 수 있다.
   type: NodePort
   selector:
     app: ocr

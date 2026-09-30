@@ -102,7 +102,7 @@ const downloadAllBtn = document.getElementById("downloadAll");
 // 카드별 상태. [전체 복사]가 여기서 문자열을 모은다.
 const items = [];
 
-// Show what the server actually runs on.
+// 서버가 실제로 무엇 위에서 도는지 보여 준다.
 fetch("/info").then(r => r.json()).then(info => {
   const badge = document.getElementById("device");
   badge.textContent = info.device;
@@ -139,9 +139,9 @@ copyAllBtn.addEventListener("click", () => {
 });
 
 /**
- * One request per image, all in flight at once.
- * The server decides how many actually run in parallel (OCR_MAX_CONCURRENCY),
- * so the wall-clock total below reflects real queueing behaviour.
+ * 이미지 한 장당 요청 하나를 만들어 한꺼번에 띄운다.
+ * 실제로 몇 개가 병렬로 도는지는 서버가 정한다(OCR_MAX_CONCURRENCY).
+ * 그래서 아래의 전체 소요 시간에는 실제 대기 동작이 그대로 반영된다.
  */
 async function sendAll(fileList) {
   const files = Array.from(fileList);

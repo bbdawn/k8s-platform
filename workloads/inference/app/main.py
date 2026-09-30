@@ -1,8 +1,7 @@
-"""OCR inference API used as a Kubernetes benchmark workload.
+"""Kubernetes 벤치마크용 OCR 추론 API.
 
-The point of this service is not OCR features, but a small, predictable
-workload that can be run unchanged across environments and compared.
-Keep it simple.
+OCR 기능을 만드는 것이 목적이 아니다. 환경이 바뀌어도 그대로 돌릴 수 있고
+비교할 수 있는, 작고 예측 가능한 workload로서 존재한다. 단순하게 유지할 것.
 """
 
 from __future__ import annotations
@@ -61,7 +60,7 @@ class OcrResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the OCR model once, before the first request is served."""
+    """첫 요청을 받기 전에 OCR 모델을 한 번만 로드한다."""
     app.state.ocr_engine = None
     app.state.ocr_error = None
     try:
@@ -69,8 +68,8 @@ async def lifespan(app: FastAPI):
         if WARM_UP_ON_STARTUP:
             await run_in_threadpool(ocr.warm_up, app.state.ocr_engine)
     except Exception as exc:  # noqa: BLE001
-        # Starting without an engine is deliberate: /health and /info stay
-        # usable so the failure is visible instead of a crash loop.
+        # 엔진 없이 뜨는 것은 의도된 동작이다. /health와 /info가 살아 있어야
+        # CrashLoopBackOff 대신 실패 원인이 보인다.
         app.state.ocr_error = f"{type(exc).__name__}: {exc}"
         logger.error("OCR engine initialization failed: %s", app.state.ocr_error)
 
@@ -92,25 +91,24 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
-    """Minimal upload page. The API itself is also usable via /docs."""
+    """최소한의 업로드 화면. API 자체는 /docs 로도 쓸 수 있다."""
     return FileResponse(STATIC_DIR / "index.html")
 
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Liveness check. Intentionally does not touch the OCR engine."""
+    """liveness 확인. OCR 엔진을 일부러 건드리지 않는다."""
     return HealthResponse(status="ok")
 
 
 @app.get("/ready", response_model=HealthResponse)
 def ready() -> HealthResponse:
-    """Readiness: 503 until the OCR engine is actually loaded.
+    """readiness. OCR 엔진이 실제로 올라오기 전에는 503을 반환한다.
 
-    Deliberately separate from /health. /health only reports that the process
-    is up, so a readiness probe pointed at it marks the pod Ready even when
-    engine initialization failed - the Service then sends traffic to a pod that
-    answers every /ocr with 503. A benchmark driven off that Ready signal
-    measures a service that cannot serve.
+    /health와 일부러 분리했다. /health는 프로세스가 떠 있다는 것만 알려주므로,
+    readiness probe를 거기에 걸면 엔진 초기화가 실패한 파드도 Ready가 된다.
+    그러면 Service가 트래픽을 보내고 /ocr은 전부 503을 반환한다. 그 Ready
+    신호를 믿고 도는 벤치마크는 서비스하지 못하는 서비스를 측정하게 된다.
     """
     if app.state.ocr_engine is None:
         raise HTTPException(
@@ -122,10 +120,10 @@ def ready() -> HealthResponse:
 
 @app.get("/info", response_model=InfoResponse)
 def info() -> InfoResponse:
-    """What this process is actually running: paddle build, device, engine state.
+    """이 프로세스가 실제로 무엇을 돌리고 있는지: paddle 버전, device, 엔진 상태.
 
-    Kept separate from /ready because this must answer even when the engine is
-    dead - it is the endpoint you hit to find out why.
+    /ready와 따로 둔 이유는, 엔진이 죽었을 때도 답해야 하기 때문이다.
+    "왜 죽었는지"를 물어보러 오는 엔드포인트다.
     """
     return InfoResponse(
         **ocr.runtime_info(),
@@ -135,9 +133,9 @@ def info() -> InfoResponse:
 
 @app.post("/ocr", response_model=OcrResponse)
 async def run_ocr(file: UploadFile = File(...)) -> OcrResponse:
-    """Run OCR on an uploaded jpg/png image."""
-    # Validate the request first, so a bad request is a clear 400 even when the
-    # engine is missing (which is the normal case on a CPU dev machine).
+    """업로드된 jpg/png 이미지 한 장을 OCR 처리한다."""
+    # 요청 검증을 먼저 한다. 그래야 엔진이 없는 상태에서도 잘못된 요청이
+    # 503이 아니라 400으로 분명하게 나온다.
     try:
         ocr.validate_upload(file.filename, file.content_type)
         raw = await file.read()
@@ -156,7 +154,7 @@ async def run_ocr(file: UploadFile = File(...)) -> OcrResponse:
 
     started = time.perf_counter()
     try:
-        # predict() is blocking CPU work, so keep it off the event loop.
+        # predict()는 블로킹 CPU 작업이므로 이벤트 루프에서 떼어 놓는다.
         items = await run_in_threadpool(ocr.run_ocr, engine, image)
     except Exception as exc:  # noqa: BLE001
         logger.exception("OCR inference failed")

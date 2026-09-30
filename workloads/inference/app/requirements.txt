@@ -1,14 +1,14 @@
 # ---------------------------------------------------------------------------
-# Python 3.9 - 3.13. PaddlePaddle 3.3.x publishes no wheels for 3.14 yet, so
-# build the image on python:3.11 / 3.12.
+# Python 3.9 ~ 3.13. PaddlePaddle 3.3.x는 아직 3.14용 wheel을 내지 않으므로
+# 이미지는 python:3.11 또는 3.12로 빌드할 것.
 #
-# PaddlePaddle is NOT listed here on purpose: the Dockerfile installs it in its
-# own layer so that changing this file does not reinstall it. Install it
-# BEFORE this file:
+# PaddlePaddle은 일부러 여기에 넣지 않았다. Dockerfile이 따로 레이어를 나눠
+# 설치하므로, 이 파일이 바뀌어도 1.4GB짜리를 다시 받지 않는다.
+# 이 파일보다 먼저 설치할 것:
 #
 #   pip install paddlepaddle==3.3.1
 #
-# Version reference:
+# 버전 참고:
 #   https://www.paddlepaddle.org.cn/documentation/docs/en/install/pip/linux-pip_en.html
 # ---------------------------------------------------------------------------
 
@@ -19,7 +19,7 @@ pydantic>=2.7
 python-multipart>=0.0.9
 
 # --- OCR ---
-# 3.x is required: this code uses PaddleOCR(device=...) and .predict().
+# 3.x 필수. 이 코드는 PaddleOCR(device=...)와 .predict()를 쓴다.
 paddleocr>=3.0,<4.0
 pillow>=10.0
 numpy>=1.26

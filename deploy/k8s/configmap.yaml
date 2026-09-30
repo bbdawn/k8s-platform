@@ -5,8 +5,8 @@ metadata:
 data:
   OCR_LANG: "korean"
 
-  # One predict() per pod. The comparison axis is pod count, not in-pod
-  # threads - see README section 5.1.
+  # 파드당 predict() 한 번. 비교 축은 파드 개수이지 파드 내부 스레드가 아니다.
+  # README 5.1 참고.
   OCR_MAX_CONCURRENCY: "1"
 
   # 업로드 이미지의 긴 변을 이 값으로 줄인 뒤 추론한다. 0이면 끄는데, 끄면
@@ -19,23 +19,23 @@ data:
   OCR_USE_TEXTLINE_ORIENTATION: "false"
   LOG_LEVEL: "INFO"
 
-  # oneDNN off: paddle 3.3.1's PIR executor cannot run the oneDNN kernels this
-  # pipeline builds and every predict() dies with NotImplementedError
-  # (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc:116). CPU
-  # numbers measured here are therefore "without oneDNN" - see README 7.
+  # oneDNN을 끈다. paddle 3.3.1의 PIR 실행기가 이 파이프라인이 만드는 oneDNN
+  # 커널을 처리하지 못해 모든 predict()가 NotImplementedError로 죽는다
+  # (ConvertPirAttribute2RuntimeAttribute, onednn_instruction.cc:116).
+  # 따라서 여기서 재는 수치는 전부 "oneDNN을 끈" 값이다. README 7장 참고.
   OCR_ENABLE_MKLDNN: "false"
 
-  # Two thread counts, two different layers. Both must match the CPU limit in
-  # deployment.yaml or the pod runs ~10 threads that fight each other.
-  #   OMP_NUM_THREADS  OpenMP, used by paddle's CPU kernels. Defaults to the
-  #                    host core count, not the container's limit.
-  #   OCR_CPU_THREADS  paddle's own cpu_threads. PaddleOCR defaults it to 10.
+  # 스레드 수가 둘인데 층위가 다르다. 둘 다 deployment.yaml의 CPU limit과
+  # 맞춰야 한다. 안 맞추면 파드가 스레드를 10개쯤 띄우고 서로 밟는다.
+  #   OMP_NUM_THREADS  OpenMP. paddle의 CPU 커널이 쓴다. 기본값이 컨테이너의
+  #                    limit이 아니라 호스트 코어 수다.
+  #   OCR_CPU_THREADS  paddle 자체의 cpu_threads. PaddleOCR 기본값이 10이다.
   #
-  # 1, not 2, and the reason is inside the container rather than outside it.
-  # With a 1500m limit, two inference threads take the whole quota and the
-  # uvicorn event loop never gets scheduled - so /health does not answer, the
-  # liveness probe times out, and kubelet restarts a pod that was working.
-  # One thread leaves ~500m for the server to stay responsive while inferring.
-  # Inference is slower this way. A pod that answers is worth more.
+  # 2가 아니라 1인 이유는 컨테이너 바깥이 아니라 안쪽에 있다. limit이 1500m인데
+  # 추론 스레드 둘이 그 quota를 다 가져가면 uvicorn 이벤트 루프가 스케줄되지
+  # 못한다. 그러면 /health가 응답하지 못하고 liveness probe가 타임아웃 나서,
+  # 잘 돌던 파드를 kubelet이 재시작한다. 스레드 하나면 추론 중에도 서버가
+  # 응답할 몫으로 약 500m가 남는다.
+  # 이렇게 하면 추론은 느려진다. 응답하는 파드가 더 값어치 있다.
   OMP_NUM_THREADS: "1"
   OCR_CPU_THREADS: "1"

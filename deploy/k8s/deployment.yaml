@@ -6,14 +6,14 @@ metadata:
     app: ocr
 spec:
   replicas: 1
-  # Recreate, not the default RollingUpdate. RollingUpdate starts the new pod
-  # before retiring the old one, but nodeSelector pins both to the same node,
-  # so the replacement asks that node for a second cpu:1/memory:2Gi it does not
-  # have. The new pod stays Pending, the old one waits for it to become Ready,
-  # and the rollout deadlocks - a 2-core worker hit this on the first redeploy:
+  # 기본값 RollingUpdate가 아니라 Recreate다. RollingUpdate는 예전 파드를 내리기
+  # 전에 새 파드를 띄우는데, nodeSelector가 둘 다 같은 노드에 묶어 두므로 새
+  # 파드가 그 노드에 두 번째 몫을 요구하게 된다. 노드에 그만한 여유가 없으면 새
+  # 파드는 Pending, 예전 파드는 새 파드가 Ready 되기를 기다려 rollout이 교착된다.
+  # 2코어 worker에서 첫 재배포에 실제로 걸렸다:
   #   0/3 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, ...
-  # Zero-downtime is worthless here anyway, and two copies of the workload
-  # briefly sharing the measured node's CPU would be actively harmful.
+  # 여기서 무중단은 아무 가치가 없고, 측정 대상 노드에서 workload 두 벌이 잠시
+  # 라도 CPU를 나눠 쓰는 것은 오히려 해롭다.
   strategy:
     type: Recreate
   selector:
@@ -24,27 +24,28 @@ spec:
       labels:
         app: ocr
     spec:
-      # Pin to the node the image was built on. There is no registry, so the
-      # image exists on exactly one node and any other node gives
-      # ErrImageNeverPull. It is also required for measurement: unpinned
-      # replicas spread across workers and mix numbers from two machines.
+      # 이미지를 빌드한 노드에 파드를 고정한다. 레지스트리가 없어서 이미지가
+      # 정확히 한 노드에만 있고, 다른 노드에 뜨면 ErrImageNeverPull이 난다.
+      # 측정을 위해서도 필요하다. 고정하지 않으면 replica가 worker들에 흩어져
+      # 서로 다른 머신의 수치가 섞인다.
       #
-      # A role label, not kubernetes.io/hostname. A hostname in a manifest ties
-      # the file to one machine - moving the workload then means editing, and
-      # this file was edited on every deploy because of it. The label says which
-      # node plays the "measured" role, so moving is a cluster-side operation:
+      # kubernetes.io/hostname이 아니라 역할 label을 쓴다. 매니페스트에 머신
+      # 이름이 들어가면 파일이 그 머신에 묶여서, workload를 옮길 때마다 파일을
+      # 고쳐야 한다. 실제로 그것 때문에 배포할 때마다 이 파일을 수정했다.
+      # label은 어느 노드가 "측정 대상" 역할을 맡는지를 말하므로, 옮기는 일이
+      # 클러스터 작업이 된다:
       #
-      #   kubectl label node <old> ocr-bench/role-
-      #   kubectl label node <new> ocr-bench/role=target
+      #   kubectl label node <이전> ocr-bench/role-
+      #   kubectl label node <새것> ocr-bench/role=target
       #
-      # No node carries the label until someone sets it, so an unprepared
-      # cluster leaves the pod Pending with a readable "didn't match node
-      # selector" event - better than landing on the wrong node and dying on an
-      # image pull. Whichever node gets the label must have the image on it.
+      # 누군가 붙이기 전까지는 어느 노드에도 이 label이 없다. 그래서 준비되지
+      # 않은 클러스터에서는 파드가 Pending에 머물고 "didn't match node selector"
+      # 라는 읽을 수 있는 event가 남는다. 엉뚱한 노드에 떴다가 image pull에서
+      # 죽는 것보다 낫다. label을 받은 노드에는 이미지가 있어야 한다.
       nodeSelector:
         ocr-bench/role: target
-      # Must match the Dockerfile's APP_UID build arg: the image bakes the OCR
-      # models under that user's HOME and chowns them to it.
+      # Dockerfile의 APP_UID build arg와 같아야 한다. 이미지는 그 사용자의 HOME
+      # 아래에 OCR 모델을 굽고 소유권도 그 사용자에게 넘긴다.
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -58,36 +59,33 @@ spec:
           envFrom:
             - configMapRef:
                 name: ocr-config
-          # Measured, not guessed: the container peaked at 1282Mi (memory.peak
-          # in its cgroup) while the node reports 3810Mi allocatable.
+          # 감이 아니라 실측값이다. 컨테이너 cgroup의 memory.peak이 1282Mi였고
+          # 노드 allocatable은 3810Mi다.
           #
-          # requests == limits on both axes puts the pod in the Guaranteed QoS
-          # class, so it is the last thing evicted under node pressure - and a
-          # benchmark needs fixed resources anyway, or the numbers move.
+          # requests와 limits를 양쪽 다 같게 맞추면 파드가 Guaranteed QoS 등급이
+          # 되어, 노드가 쪼들릴 때 가장 나중에 밀려난다. 벤치마크는 어차피 자원이
+          # 고정돼야 수치가 흔들리지 않는다.
           #
-          # cpu is 1500m, not 2. The node has exactly 2 allocatable cores and
-          # nothing is kube-reserved, so a pod allowed 2 cores can starve
-          # kubelet, containerd and Calico. That is not theory: it happened.
-          # The probes below timed out against a pegged container and kubelet
-          # killed it:
+          # cpu가 2가 아니라 1500m인 이유: 이 노드의 allocatable이 정확히 2코어인데
+          # kube-reserved가 설정돼 있지 않다. 2코어를 다 쓸 수 있는 파드는 kubelet,
+          # containerd, Calico를 굶길 수 있다. 가정이 아니라 실제로 일어났다.
+          # 아래 probe들이 포화된 컨테이너를 상대로 타임아웃 나고 kubelet이 죽였다:
           #   Liveness probe failed: ... context deadline exceeded
           #   Killing: Container ocr failed liveness probe, will be restarted
-          # Leaving 500m for the system is what stops that.
+          # 시스템 몫으로 500m를 남기는 것이 이를 막는다.
           #
-          # memory is 3Gi. 2560Mi was not enough: recognition on a 1200x1600
-          # image went over it and the container was OOMKilled mid-request.
+          # memory는 3Gi. 2560Mi로는 모자랐다. 1200x1600 이미지의 인식 단계가
+          # 그 한도를 넘겨 요청 처리 도중 OOMKilled로 죽었다.
           #
-          # Keep it under allocatable (3810Mi on this node), which is the whole
-          # point. The original 4Gi was *larger* than the node could give, so an
-          # overrun starved the node before the container hit its own limit -
-          # the kill then showed up as SIGTERM/Error with failing probes, which
-          # reads like a probe problem and is not one. Under allocatable, the
-          # same overrun is a clean OOMKilled on this container. Being wrong on
-          # the low side leaves a readable cause; being wrong on the high side
-          # does not.
+          # allocatable(이 노드에서 3810Mi)보다 작게 두는 것이 핵심이다. 원래
+          # 값이던 4Gi는 노드가 줄 수 있는 것보다 **컸다.** 그래서 컨테이너가
+          # 자기 한도에 닿기 전에 노드가 먼저 말랐고, 그 죽음이 probe 실패를
+          # 동반한 SIGTERM/Error로 나타났다 - probe 문제처럼 읽히지만 아니다.
+          # 한도를 allocatable 아래로 두면 같은 초과가 이 컨테이너의 깔끔한
+          # OOMKilled로 나온다. 낮게 틀리면 원인이 읽히고, 높게 틀리면 안 읽힌다.
           #
-          # ~740Mi is left for calico, kube-proxy and the eviction threshold.
-          # There is not much room above this on a 4GB node.
+          # calico, kube-proxy, eviction threshold 몫으로 약 740Mi가 남는다.
+          # 4GB 노드에서 이 위로는 여유가 많지 않다.
           resources:
             requests:
               cpu: "1500m"
@@ -95,26 +93,26 @@ spec:
             limits:
               cpu: "1500m"
               memory: 3Gi
-          # Two endpoints on purpose:
-          #   /ready  503 until the OCR engine is loaded
-          #   /health 200 as soon as the process is up, engine or not
+          # 엔드포인트를 둘로 나눠 둔 것은 의도다:
+          #   /ready   OCR 엔진이 올라오기 전까지 503
+          #   /health  프로세스만 떠 있으면 엔진과 무관하게 200
           #
-          # Startup and readiness must use /ready. Pointed at /health they pass
-          # immediately, so a pod whose engine failed to initialize is marked
-          # Ready and gets traffic it can only answer with 503 - the failure
-          # hides instead of showing up, and a benchmark measures a dead engine.
+          # startup과 readiness는 /ready를 봐야 한다. /health를 보게 하면 즉시
+          # 통과해 버려서, 엔진 초기화가 실패한 파드도 Ready로 표시되고 503밖에
+          # 못 내놓는 트래픽을 받는다. 드러나야 할 실패가 오히려 숨고, 벤치마크는
+          # 죽은 엔진을 측정하게 된다.
           #
-          # Liveness must NOT use /ready: engine init happens once at startup
-          # and is never retried, so a failed engine would restart the pod
-          # forever instead of leaving it up to be diagnosed.
+          # liveness는 /ready를 보면 **안 된다.** 엔진 초기화는 기동 때 한 번뿐이고
+          # 재시도가 없어서, 실패한 엔진이면 파드가 무한히 재시작만 하고 진단할
+          # 기회가 사라진다.
           #
-          # Model load plus the warm-up inference takes tens of seconds on CPU.
-          # The startup probe absorbs that so liveness can stay tight afterwards
-          # without killing a pod that is merely still booting.
+          # CPU에서는 모델 로드와 워밍업 추론에 수십 초가 든다. startup probe가
+          # 그 시간을 흡수해 주므로, 이후 liveness는 촘촘하게 두어도 기동 중인
+          # 파드를 죽이지 않는다.
           #
-          # timeoutSeconds is 5 everywhere because the default is 1, and one
-          # second is not enough for a CPU-saturated container to answer even a
-          # trivial handler. That default is what killed this pod repeatedly.
+          # timeoutSeconds를 셋 다 5로 둔 이유: 기본값이 1초인데, CPU가 포화된
+          # 컨테이너는 아무리 가벼운 핸들러라도 1초 안에 답하지 못한다. 그 기본값
+          # 때문에 이 파드가 반복해서 죽었다.
           startupProbe:
             httpGet:
               path: /ready

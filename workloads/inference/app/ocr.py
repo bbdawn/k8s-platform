@@ -1,7 +1,7 @@
-"""PaddleOCR engine creation and inference.
+"""PaddleOCR 엔진 생성과 추론.
 
-The engine is created once (at application startup) and reused for every
-request, so that model loading time never leaks into benchmark numbers.
+엔진은 애플리케이션이 뜰 때 한 번만 만들고 모든 요청이 재사용한다. 모델
+로딩 시간이 벤치마크 수치에 섞이지 않게 하기 위해서다.
 """
 
 from __future__ import annotations
@@ -16,65 +16,64 @@ from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
-# PaddleOCR still wants an explicit device string; pinning it here keeps it
-# from auto-detecting something else.
+# PaddleOCR은 device 문자열을 명시적으로 받는다. 여기서 고정해 두면 다른 것을
+# 자동으로 골라잡는 일이 없다.
 DEVICE = "cpu"
 
-# --- configuration (all overridable via env / ConfigMap) ---------------------
+# --- configuration (전부 env / ConfigMap 으로 덮어쓸 수 있다) -----------------
 
-# PaddleOCR language model, e.g. korean / en / ch / japan.
+# PaddleOCR 인식 언어 모델. korean / en / ch / japan 등.
 OCR_LANG = os.getenv("OCR_LANG", "korean")
 
-# Text-line orientation classification costs extra inference time. Off by
-# default so the benchmark measures detection + recognition only.
+# 텍스트 줄 방향 분류는 추론 시간을 더 쓴다. 벤치마크가 검출 + 인식만 재도록
+# 기본값은 꺼 둔다.
 USE_TEXTLINE_ORIENTATION = os.getenv("OCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
 
-# oneDNN, paddle's CPU acceleration library. Off by default because paddle
-# 3.3.1's PIR executor cannot run the oneDNN kernels this pipeline builds:
+# oneDNN은 paddle의 CPU 가속 라이브러리다. 기본값을 끔으로 둔 이유는, paddle
+# 3.3.1의 PIR 실행기가 이 파이프라인이 만드는 oneDNN 커널을 처리하지 못하기
+# 때문이다:
 #   NotImplementedError: (Unimplemented) ConvertPirAttribute2RuntimeAttribute
 #   not support [pir::ArrayAttribute<pir::DoubleAttribute>]
 #     at .../new_executor/instruction/onednn/onednn_instruction.cc:116
-# Engine creation and model loading both succeed; it fails on the first
-# predict(), so /health and even /ready look fine while every /ocr returns 500.
+# 엔진 생성과 모델 로드는 성공하고 첫 predict()에서 죽는다. 그래서 /health도
+# /ready도 멀쩡해 보이는데 /ocr만 전부 500이 된다.
 #
-# PaddleOCR defaults this to True, so leaving it alone means no CPU inference
-# at all. Turning it off costs inference speed, so every number this workload
-# produces is a "without oneDNN" number - state that alongside it.
+# PaddleOCR 기본값이 True라서 그대로 두면 CPU 추론이 아예 안 된다. 끄면 추론이
+# 느려지므로, 이 workload가 내는 모든 수치는 "oneDNN을 끈" 값이다. 수치를 적을
+# 때 이 조건을 같이 밝힐 것.
 ENABLE_MKLDNN = os.getenv("OCR_ENABLE_MKLDNN", "false").lower() == "true"
 
-# Paddle's own thread count, separate from OMP_NUM_THREADS. PaddleOCR defaults
-# it to 10 with no regard for the container's CPU limit, so a pod limited to
-# 2 cores runs 10 threads that fight each other - which shows up as unstable
-# latency, exactly what a benchmark must not have. Keep this in step with the
-# CPU limit in deployment.yaml.
+# paddle 자체의 스레드 수. OMP_NUM_THREADS와는 다른 층위다. PaddleOCR 기본값이
+# 10이고 컨테이너의 CPU limit을 전혀 보지 않아서, 2코어로 제한된 파드가 스레드
+# 10개를 띄우고 서로 밟는다. 지연이 들쭉날쭉해지는데 벤치마크가 가장 피해야 할
+# 일이다. deployment.yaml의 CPU limit과 맞춰 둘 것.
 CPU_THREADS = max(1, int(os.getenv("OCR_CPU_THREADS", "2")))
 
-# A PaddleOCR predictor is not thread-safe. This caps how many predict() calls
-# may run against the shared engine at once:
-#   1 -> safe default, one inference at a time per pod (scale with replicas)
-#   N -> allow N in-flight calls, for in-pod concurrency experiments
+# PaddleOCR predictor는 thread-safe하지 않다. 공유 엔진에 동시에 들어갈 수 있는
+# predict() 호출 수를 여기서 제한한다:
+#   1 -> 안전한 기본값. 파드당 한 번에 하나씩 추론한다(replica로 늘린다)
+#   N -> 동시 N건 허용. 파드 내부 동시성을 실험할 때만
 MAX_CONCURRENCY = max(1, int(os.getenv("OCR_MAX_CONCURRENCY", "1")))
 
-# Reject oversized uploads before decoding them.
+# 디코딩하기 전에 너무 큰 업로드를 먼저 거른다.
 MAX_IMAGE_BYTES = int(os.getenv("OCR_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
 
-# Cap the longer side of the decoded image. 0 disables it.
+# 디코딩한 이미지의 긴 변을 이 값으로 제한한다. 0이면 끈다.
 #
-# Phone cameras produce 3000-4000px photos. At full size the pipeline holds the
-# decoded array plus float32 copies of it (3024x4032 RGB is 36MB as uint8 and
-# 146MB as float32, and there is more than one copy in flight), which is enough
-# to get the container killed mid-request on a 4Gi pod. The client sees the
-# connection drop with no status code - "TypeError: Failed to fetch" in the
-# browser, curl exit 52 - because nothing is left to answer with. A laptop with
-# 16GB never reaches this, so it only appears once the workload is in a
-# container with a limit.
+# 휴대폰 카메라는 3000~4000px 사진을 만든다. 원본 그대로 두면 파이프라인이
+# 디코딩한 배열과 그 float32 사본들을 함께 들고 있게 되는데(3024x4032 RGB는
+# uint8로 36MB, float32로는 146MB이고 사본이 하나가 아니다), 메모리 제한이
+# 걸린 파드에서는 요청 처리 도중 컨테이너가 죽기에 충분하다. 클라이언트는
+# 상태 코드도 없이 연결이 끊기는 것만 본다 - 브라우저는 "TypeError: Failed to
+# fetch", curl은 exit 52. 답할 주체가 사라졌기 때문이다. 16GB 노트북에서는
+# 여기까지 가지 않아서, 제한이 걸린 컨테이너에 넣어야 비로소 나타난다.
 #
-# Downscaling here rather than through PaddleOCR's text_det_limit_side_len is
-# deliberate: that setting bounds the detection input only, while recognition
-# still crops from the array we pass in. Capping the array bounds both.
+# PaddleOCR의 text_det_limit_side_len이 아니라 여기서 줄이는 것은 의도다.
+# 그 설정은 검출 입력만 제한하고, 인식 단계는 여전히 우리가 넘긴 배열에서
+# 잘라 쓴다. 배열 자체를 줄여야 양쪽이 같이 잡힌다.
 #
-# It also pins input size, which the benchmark needs anyway - otherwise the
-# numbers depend on whatever resolution the phone happened to produce.
+# 입력 크기를 고정하는 효과도 있는데 벤치마크에는 어차피 필요한 것이다.
+# 그러지 않으면 수치가 "휴대폰이 어쩌다 만든 해상도"에 좌우된다.
 MAX_IMAGE_SIDE = int(os.getenv("OCR_MAX_IMAGE_SIDE", "1600"))
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
@@ -85,11 +84,11 @@ _predict_slots = threading.BoundedSemaphore(MAX_CONCURRENCY)
 
 
 class ImageError(ValueError):
-    """Raised when the uploaded bytes are not a usable jpg/png image."""
+    """업로드된 바이트가 쓸 수 있는 jpg/png 이미지가 아닐 때 발생한다."""
 
 
 def create_ocr_engine():
-    """Build the PaddleOCR engine. Called once during startup."""
+    """PaddleOCR 엔진을 만든다. 기동 중 한 번만 호출된다."""
     from paddleocr import PaddleOCR
 
     logger.info(
@@ -103,10 +102,10 @@ def create_ocr_engine():
         CPU_THREADS,
     )
 
-    # Document orientation / unwarping are extra pipeline stages we do not need
-    # for a benchmark workload; disabling them keeps runs comparable.
-    # enable_mkldnn / cpu_threads reach PaddleOCR through **kwargs, which it
-    # forwards to PaddleX.
+    # 문서 방향 보정과 왜곡 보정은 벤치마크 workload에 필요 없는 추가 단계다.
+    # 꺼 두어야 실행 간 비교가 가능하다.
+    # enable_mkldnn / cpu_threads는 **kwargs를 통해 PaddleOCR에 들어가고,
+    # PaddleOCR이 그대로 PaddleX에 넘긴다.
     engine = PaddleOCR(
         device=DEVICE,
         lang=OCR_LANG,
@@ -121,11 +120,11 @@ def create_ocr_engine():
 
 
 def runtime_info() -> dict:
-    """Snapshot for the /info endpoint. Never raises.
+    """/info 엔드포인트가 쓸 스냅샷. 예외를 던지지 않는다.
 
-    paddle is imported lazily and guarded: a broken install must show up as a
-    reported error, not as an endpoint that 500s while we are trying to find
-    out what is wrong with the pod.
+    paddle은 늦게, 예외 처리와 함께 import한다. 설치가 깨졌으면 그 사실이
+    보고되어야지, 파드에 무슨 문제가 있는지 알아보려고 부른 엔드포인트가
+    같은 문제로 500을 내면 안 된다.
     """
     info = {"paddle_version": None, "device": DEVICE, "error": None}
     try:
@@ -139,23 +138,23 @@ def runtime_info() -> dict:
 
 
 def _warm_up_image() -> np.ndarray:
-    """A small image with actual marks on it, for warm-up.
+    """워밍업용. 실제로 표시가 있는 작은 이미지다.
 
-    Not a blank canvas. Detection finds nothing on blank white, so recognition
-    never runs and warm-up proves only half the pipeline. That gap hid a real
-    failure: "warm-up inference finished" was logged by a pod that then died
-    with OOMKilled on the first request carrying text.
+    빈 캔버스가 아니다. 흰 배경에서는 검출이 아무것도 찾지 못해 인식 단계가
+    아예 실행되지 않고, 그러면 워밍업이 파이프라인의 절반만 확인하게 된다.
+    이 틈이 실제 장애를 가렸다. "warm-up inference finished"를 찍은 파드가
+    글자가 있는 첫 요청에서 OOMKilled로 죽었다.
     """
     image = np.full((320, 320, 3), 255, dtype=np.uint8)
-    # A few filled rectangles are enough for detection to emit boxes and hand
-    # them to recognition. No font needed, so this works in any base image.
+    # 채운 사각형 몇 개면 검출이 상자를 내놓고 인식에 넘기기에 충분하다.
+    # 폰트가 필요 없으므로 어떤 베이스 이미지에서도 동작한다.
     for row in range(60, 260, 70):
         image[row : row + 24, 40:280] = 0
     return image
 
 
 def warm_up(engine) -> None:
-    """Run one throwaway inference so the first real request is not the slowest."""
+    """버리는 추론을 한 번 돌려서, 첫 실제 요청이 가장 느리지 않게 한다."""
     blank = _warm_up_image()
     try:
         run_ocr(engine, blank)
@@ -165,7 +164,7 @@ def warm_up(engine) -> None:
 
 
 def validate_upload(filename: str | None, content_type: str | None) -> None:
-    """Cheap checks on the upload metadata, before reading the body."""
+    """본문을 읽기 전에 업로드 메타데이터만 가볍게 검사한다."""
     extension = os.path.splitext(filename or "")[1].lower()
     if extension and extension not in ALLOWED_EXTENSIONS:
         raise ImageError(f"unsupported file extension '{extension}', allowed: jpg, jpeg, png")
@@ -175,7 +174,7 @@ def validate_upload(filename: str | None, content_type: str | None) -> None:
 
 
 def _downscale(image: Image.Image) -> Image.Image:
-    """Shrink the image so its longer side is at most MAX_IMAGE_SIDE."""
+    """긴 변이 MAX_IMAGE_SIDE 이하가 되도록 이미지를 줄인다."""
     if MAX_IMAGE_SIDE <= 0 or max(image.size) <= MAX_IMAGE_SIDE:
         return image
 
@@ -184,12 +183,12 @@ def _downscale(image: Image.Image) -> Image.Image:
     logger.info(
         "downscaled %dx%d -> %dx%d", image.width, image.height, resized[0], resized[1]
     )
-    # LANCZOS keeps small text legible; the cheaper filters smear it.
+    # LANCZOS는 작은 글씨를 알아볼 수 있게 남긴다. 싼 필터는 뭉갠다.
     return image.resize(resized, Image.LANCZOS)
 
 
 def decode_image(raw: bytes) -> np.ndarray:
-    """Decode uploaded bytes into a BGR numpy array, entirely in memory."""
+    """업로드된 바이트를 BGR numpy 배열로 디코딩한다. 전부 메모리에서 처리한다."""
     if not raw:
         raise ImageError("uploaded file is empty")
     if len(raw) > MAX_IMAGE_BYTES:
@@ -207,15 +206,15 @@ def decode_image(raw: bytes) -> np.ndarray:
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise ImageError(f"failed to decode image: {exc}") from exc
 
-    # PaddleOCR expects BGR channel order, the OpenCV convention.
+    # PaddleOCR은 OpenCV 관행대로 BGR 채널 순서를 기대한다.
     return array[:, :, ::-1].copy()
 
 
 def _extract_texts(page) -> tuple[list, list]:
-    """Pull (rec_texts, rec_scores) out of one PaddleOCR result page."""
+    """PaddleOCR 결과 page 하나에서 (rec_texts, rec_scores)를 꺼낸다."""
     data = page
     try:
-        # Some pipeline versions nest the payload under a "res" key.
+        # pipeline 버전에 따라 결과가 "res" 키 아래에 한 겹 더 들어 있다.
         if "res" in data and isinstance(data["res"], dict):
             data = data["res"]
         return list(data.get("rec_texts", [])), list(data.get("rec_scores", []))
@@ -225,7 +224,7 @@ def _extract_texts(page) -> tuple[list, list]:
 
 
 def run_ocr(engine, image: np.ndarray) -> list[dict]:
-    """Run OCR and flatten the result into [{"text": ..., "confidence": ...}]."""
+    """OCR을 돌리고 결과를 [{"text": ..., "confidence": ...}] 형태로 펴서 반환한다."""
     with _predict_slots:
         pages = engine.predict(image)
 
