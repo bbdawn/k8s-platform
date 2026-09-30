@@ -28,11 +28,21 @@ spec:
       # image exists on exactly one node and any other node gives
       # ErrImageNeverPull. It is also required for measurement: unpinned
       # replicas spread across workers and mix numbers from two machines.
-      # Left as a placeholder on purpose - an unfilled value leaves the pod
-      # Pending with a readable "didn't match node selector" event, which beats
-      # discovering the problem as a pull failure.
+      #
+      # A role label, not kubernetes.io/hostname. A hostname in a manifest ties
+      # the file to one machine - moving the workload then means editing, and
+      # this file was edited on every deploy because of it. The label says which
+      # node plays the "measured" role, so moving is a cluster-side operation:
+      #
+      #   kubectl label node <old> ocr-bench/role-
+      #   kubectl label node <new> ocr-bench/role=target
+      #
+      # No node carries the label until someone sets it, so an unprepared
+      # cluster leaves the pod Pending with a readable "didn't match node
+      # selector" event - better than landing on the wrong node and dying on an
+      # image pull. Whichever node gets the label must have the image on it.
       nodeSelector:
-        kubernetes.io/hostname: REPLACE_WITH_BUILD_NODE_HOSTNAME
+        ocr-bench/role: target
       # Must match the Dockerfile's APP_UID build arg: the image bakes the OCR
       # models under that user's HOME and chowns them to it.
       securityContext:

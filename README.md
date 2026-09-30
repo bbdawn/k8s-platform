@@ -234,13 +234,11 @@ sudo nerdctl -n k8s.io build -t ocr-workload:0.1.0-cpu workloads/inference
 containerd는 이미지 네임스페이스가 나뉘어 있고, kubelet은 `k8s.io`만 본다.
 `imagePullPolicy: IfNotPresent`는 이 전제에 맞춰 이미 설정되어 있다.
 
-이미지가 **한 노드에만** 존재하므로 `deployment.yaml`의 `nodeSelector`를 그 노드로
-반드시 채울 것. 비워 두면 파드가 `Pending`으로 멈춘다(의도된 동작 — 다른 노드에
-배치됐다가 `ErrImageNeverPull`로 죽는 것보다 원인이 명확하다).
+이미지가 **한 노드에만** 존재하므로 파드를 그 노드에 고정해야 한다. 고정은
+`ocr-bench/role=target` 라벨로 한다(4.3).
 
-```bash
-kubectl get nodes    # 이름 확인 후 deployment.yaml의 REPLACE_WITH_BUILD_NODE_HOSTNAME 교체
-```
+라벨이 붙은 노드가 없으면 파드는 `Pending`으로 멈춘다. 의도된 동작이다 —
+다른 노드에 배치됐다가 `ErrImageNeverPull`로 죽는 것보다 원인이 명확하다.
 
 나중에 다른 노드에도 필요해지면 그때 옮기면 된다. 미리 할 일은 아니다.
 
@@ -252,13 +250,28 @@ sudo nerdctl -n k8s.io save ocr-workload:0.1.0-cpu \
 ### 4.3 배포
 
 빌드한 태그가 `kustomization.yaml`의 기본값(`ocr-workload:0.1.0-cpu`)과 같으므로
-이미지는 손댈 것이 없다. `deployment.yaml`의 `nodeSelector`만 채우면 된다.
+이미지는 손댈 것이 없다.
+
+**클러스터에 한 번만** — 측정 대상 노드를 지정한다. 이미지를 빌드한 노드여야 한다.
 
 ```bash
-sed -i 's/REPLACE_WITH_BUILD_NODE_HOSTNAME/<worker1 노드명>/' deploy/k8s/deployment.yaml
+kubectl get nodes
+kubectl label node <빌드한 노드> ocr-bench/role=target
+kubectl get nodes -l ocr-bench/role=target     # 한 대만 나와야 한다
+```
 
+```bash
 kubectl apply -k deploy/k8s
 kubectl -n ocr-bench rollout status deploy/ocr
+```
+
+`deployment.yaml`에는 머신 이름이 없다. 측정 노드를 옮기려면 매니페스트가 아니라
+라벨을 옮긴다 — 새 노드에 이미지를 빌드해 둔 뒤:
+
+```bash
+kubectl label node <이전 노드> ocr-bench/role-
+kubectl label node <새 노드> ocr-bench/role=target
+kubectl -n ocr-bench rollout restart deploy/ocr
 ```
 
 `rollout status`가 오래 걸려도 정상이다 — 모델 로드와 워밍업에 수십 초가 든다(4.5).
@@ -289,7 +302,8 @@ worker2  ← k6 / hey (부하 생성)
 
 `nodeSelector`는 이미지 위치 때문만이 아니라 측정 설계상으로도 필요하다. 고정하지
 않으면 replica를 늘렸을 때 스케줄러가 worker들에 나눠 배치하고, `elapsed_ms`에
-**서로 다른 두 머신의 수치가 섞인다.**
+**서로 다른 두 머신의 수치가 섞인다.** `ocr-bench/role=target` 라벨을 한 노드에만
+붙이는 것이 이 역할 분담을 그대로 표현한다.
 
 ### 4.5 CPU 배포에서 주의할 것
 
