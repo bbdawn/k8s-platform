@@ -26,9 +26,16 @@ data:
   OCR_ENABLE_MKLDNN: "false"
 
   # Two thread counts, two different layers. Both must match the CPU limit in
-  # deployment.yaml or a 2-core pod runs ~10 threads that fight each other.
+  # deployment.yaml or the pod runs ~10 threads that fight each other.
   #   OMP_NUM_THREADS  OpenMP, used by paddle's CPU kernels. Defaults to the
   #                    host core count, not the container's limit.
   #   OCR_CPU_THREADS  paddle's own cpu_threads. PaddleOCR defaults it to 10.
-  OMP_NUM_THREADS: "2"
-  OCR_CPU_THREADS: "2"
+  #
+  # 1, not 2, and the reason is inside the container rather than outside it.
+  # With a 1500m limit, two inference threads take the whole quota and the
+  # uvicorn event loop never gets scheduled - so /health does not answer, the
+  # liveness probe times out, and kubelet restarts a pod that was working.
+  # One thread leaves ~500m for the server to stay responsive while inferring.
+  # Inference is slower this way. A pod that answers is worth more.
+  OMP_NUM_THREADS: "1"
+  OCR_CPU_THREADS: "1"

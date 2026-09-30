@@ -294,8 +294,10 @@ worker2  ← k6 / hey (부하 생성)
 ### 4.5 CPU 배포에서 주의할 것
 
 - **`OMP_NUM_THREADS`를 CPU limit과 맞출 것.** paddle의 CPU 커널은 컨테이너
-  limit이 아니라 **호스트 코어 수**를 보고 스레드를 만든다. 안 맞추면 2코어짜리
-  pod이 수십 개 스레드를 띄우고 서로 밟는다. 현재 둘 다 `2`.
+  limit이 아니라 **호스트 코어 수**를 보고 스레드를 만든다. 안 맞추면 pod이
+  수십 개 스레드를 띄우고 서로 밟는다. 현재 `OMP_NUM_THREADS`, `OCR_CPU_THREADS`
+  둘 다 `1`이고 CPU limit은 `1500m`이다 — 차이인 500m은 uvicorn이 추론 중에도
+  probe에 응답할 몫이다(7장).
 - **기동이 느리다.** 모델 로드 + 워밍업이 수십 초라서 `startupProbe`를
   5초 × 60회로 잡아 두었다. 이게 없으면 liveness가 부팅 중인 pod을 죽인다.
 - OCR 엔진 초기화가 실패해도 pod은 뜬다(7장 설계 의도). `Running`인데 `/ocr`이
@@ -447,9 +449,13 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
 
 - [x] ~~큰 이미지에서 컨테이너가 죽는 문제~~ — `OCR_MAX_IMAGE_SIDE`로 추론 전에
       축소해 막았다 (7장)
-- [ ] 파드 `limits`를 노드보다 작게 내릴 것 — 현재 `cpu 2 / memory 4Gi`가 노드
-      전체(2C4M)와 같아, 메모리를 넘겨도 `OOMKilled`로 기록되지 않고 노드가 먼저
-      흔들린다. 축소로 증상은 막았지만 이 구조는 그대로다
+- [x] ~~파드 `limits`를 노드보다 작게 내릴 것~~ — 실측(피크 1282Mi / allocatable
+      3810Mi)으로 `cpu 1500m / memory 2560Mi`, requests와 동일하게 잡아
+      Guaranteed QoS로 두었다 (7장)
+- [ ] 실제 영수증으로 추론이 끝까지 도는지 확인 — probe 타임아웃과 CPU 몫을
+      고친 뒤 아직 검증하지 않았다
+- [ ] 추론 중 `memory.peak`을 다시 재서 `limits.memory`를 조일 것 — 1282Mi는
+      실제 추론을 하지 않은 컨테이너의 값이다
 - [ ] 한글 영수증 인식 결과가 로컬(8장)과 **동일한가**
 - [ ] `RUN_OCR_TESTS=1 pytest tests` 10개 통과
 
@@ -521,6 +527,33 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
   `text_det_limit_side_len`이 아니라 `decode_image()`에서 줄이는 이유는, 그
   설정은 검출 입력만 제한하고 인식 단계는 여전히 원본 배열에서 잘라 쓰기
   때문이다. 배열 자체를 줄여야 양쪽이 같이 잡힌다.
+
+- **CPU limit이 노드 전부면 probe가 실패해 파드가 죽는다.** 노드 allocatable이
+  2코어인데 파드 limit도 2였다. `kube-reserved`가 설정돼 있지 않아 시스템 몫이
+  0이므로, 추론이 돌면 kubelet·containerd·Calico가 쓸 CPU가 남지 않는다.
+
+  ```
+  Liveness probe failed: Get ".../health": context deadline exceeded
+                         (Client.Timeout exceeded while awaiting headers)
+  Killing: Container ocr failed liveness probe, will be restarted
+  ```
+
+  `timeoutSeconds` 기본값이 **1초**라서, 포화된 컨테이너는 아무리 가벼운
+  핸들러라도 그 안에 응답하지 못한다. 종료 코드는 143(SIGTERM)이고
+  `OOMKilled`가 아니다 — 메모리 문제로 오해하기 쉬운 지점이다.
+
+  측정값으로 잡은 현재 설정:
+
+  | | 값 | 이유 |
+  |---|---|---|
+  | `limits.cpu` | `1500m` | 노드에 500m를 남긴다 |
+  | `OMP_NUM_THREADS` / `OCR_CPU_THREADS` | `1` | 컨테이너 안에서도 uvicorn 몫을 남긴다 |
+  | `timeoutSeconds` | `5` | 기본 1초는 부하 중에 너무 짧다 |
+  | `limits.memory` | `2560Mi` | 피크 1282Mi, allocatable 3810Mi |
+
+  메모리를 allocatable보다 크게(`4Gi`) 잡아 두면, 넘쳤을 때 컨테이너만
+  `OOMKilled`로 죽지 않고 노드가 먼저 흔들려 원인이 보이지 않는다. **낮게
+  틀리는 쪽이 낫다.**
 
 - **스레드 수를 두 군데서 맞춰야 한다.** `OMP_NUM_THREADS`(OpenMP)와 paddle 자체의
   `cpu_threads`는 별개다. 후자의 PaddleOCR 기본값이 **10**이라 컨테이너의 CPU

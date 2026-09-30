@@ -48,13 +48,33 @@ spec:
           envFrom:
             - configMapRef:
                 name: ocr-config
+          # Measured, not guessed: the container peaked at 1282Mi (memory.peak
+          # in its cgroup) while the node reports 3810Mi allocatable.
+          #
+          # requests == limits on both axes puts the pod in the Guaranteed QoS
+          # class, so it is the last thing evicted under node pressure - and a
+          # benchmark needs fixed resources anyway, or the numbers move.
+          #
+          # cpu is 1500m, not 2. The node has exactly 2 allocatable cores and
+          # nothing is kube-reserved, so a pod allowed 2 cores can starve
+          # kubelet, containerd and Calico. That is not theory: it happened.
+          # The probes below timed out against a pegged container and kubelet
+          # killed it:
+          #   Liveness probe failed: ... context deadline exceeded
+          #   Killing: Container ocr failed liveness probe, will be restarted
+          # Leaving 500m for the system is what stops that.
+          #
+          # memory is 2560Mi, well under allocatable. The previous 4Gi was
+          # *larger* than the node could actually give, so an overrun would
+          # have destabilized the node instead of producing a clean OOMKilled
+          # on this container - a failure with no readable cause.
           resources:
             requests:
-              cpu: "1"
-              memory: 2Gi
+              cpu: "1500m"
+              memory: 2560Mi
             limits:
-              cpu: "2"
-              memory: 4Gi
+              cpu: "1500m"
+              memory: 2560Mi
           # Two endpoints on purpose:
           #   /ready  503 until the OCR engine is loaded
           #   /health 200 as soon as the process is up, engine or not
@@ -71,22 +91,30 @@ spec:
           # Model load plus the warm-up inference takes tens of seconds on CPU.
           # The startup probe absorbs that so liveness can stay tight afterwards
           # without killing a pod that is merely still booting.
+          #
+          # timeoutSeconds is 5 everywhere because the default is 1, and one
+          # second is not enough for a CPU-saturated container to answer even a
+          # trivial handler. That default is what killed this pod repeatedly.
           startupProbe:
             httpGet:
               path: /ready
               port: http
-            periodSeconds: 5
-            failureThreshold: 60
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /ready
               port: http
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /health
               port: http
             periodSeconds: 20
+            timeoutSeconds: 5
             failureThreshold: 3
           securityContext:
             allowPrivilegeEscalation: false
