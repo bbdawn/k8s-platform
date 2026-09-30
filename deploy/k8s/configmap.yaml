@@ -3,13 +3,10 @@ kind: ConfigMap
 metadata:
   name: ocr-config
 data:
-  # cpu / gpu:0 / auto. Pinned to cpu here so a misdetection cannot silently
-  # change what is being measured.
-  OCR_DEVICE: "cpu"
   OCR_LANG: "korean"
 
   # One predict() per pod. The comparison axis is pod count, not in-pod
-  # threads - see README section 4.2.
+  # threads - see README section 5.1.
   OCR_MAX_CONCURRENCY: "1"
 
   OCR_WARMUP: "true"

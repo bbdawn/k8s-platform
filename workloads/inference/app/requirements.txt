@@ -1,24 +1,14 @@
 # ---------------------------------------------------------------------------
-# Python 3.9 - 3.13. PaddlePaddle 3.3.0 publishes no wheels for 3.14 yet, so
+# Python 3.9 - 3.13. PaddlePaddle 3.3.x publishes no wheels for 3.14 yet, so
 # build the image on python:3.11 / 3.12.
 #
-# PaddlePaddle is NOT listed here on purpose.
+# PaddlePaddle is NOT listed here on purpose: the Dockerfile installs it in its
+# own layer so that changing this file does not reinstall it. Install it
+# BEFORE this file:
 #
-# paddlepaddle-gpu is not served from PyPI: it must be installed from the
-# CUDA-specific PaddlePaddle index, and the index you pick has to match the
-# CUDA runtime of the base image / node. Install it BEFORE this file:
+#   pip install paddlepaddle==3.3.1
 #
-#   # CUDA 11.8
-#   pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
-#   # CUDA 12.6
-#   pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
-#   # CUDA 12.9
-#   pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
-#
-# CPU-only machine (laptop / CI), OCR itself will run on CPU:
-#   pip install paddlepaddle==3.3.0
-#
-# Check the current list before building the image:
+# Version reference:
 #   https://www.paddlepaddle.org.cn/documentation/docs/en/install/pip/linux-pip_en.html
 # ---------------------------------------------------------------------------
 

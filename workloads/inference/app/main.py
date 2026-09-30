@@ -1,8 +1,8 @@
-"""OCR inference API used as a Kubernetes GPU benchmark workload.
+"""OCR inference API used as a Kubernetes benchmark workload.
 
 The point of this service is not OCR features, but a small, predictable
-GPU workload that can be run unchanged on Full GPU / Time-slicing / MPS / MIG
-and compared. Keep it simple.
+workload that can be run unchanged across environments and compared.
+Keep it simple.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import ocr
-from gpu import get_gpu_info, resolve_device
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -39,16 +38,9 @@ class HealthResponse(BaseModel):
     status: str
 
 
-class GpuResponse(BaseModel):
-    cuda_available: bool
-    gpu_count: int
-    gpu_name: str | None = None
-    gpu_memory_total_mb: int | None = None
-    compiled_with_cuda: bool
+class InfoResponse(BaseModel):
     paddle_version: str | None = None
-    paddle_device: str | None = None
-    device_setting: str
-    ocr_device: str
+    device: str
     ocr_ready: bool
     error: str | None = None
 
@@ -77,7 +69,7 @@ async def lifespan(app: FastAPI):
         if WARM_UP_ON_STARTUP:
             await run_in_threadpool(ocr.warm_up, app.state.ocr_engine)
     except Exception as exc:  # noqa: BLE001
-        # Starting without an engine is deliberate: /health and /gpu stay
+        # Starting without an engine is deliberate: /health and /info stay
         # usable so the failure is visible instead of a crash loop.
         app.state.ocr_error = f"{type(exc).__name__}: {exc}"
         logger.error("OCR engine initialization failed: %s", app.state.ocr_error)
@@ -89,7 +81,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="OCR Inference Workload",
-    description="PaddleOCR inference API for Kubernetes GPU benchmarking.",
+    description="PaddleOCR inference API for Kubernetes benchmarking.",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -106,7 +98,7 @@ def index() -> FileResponse:
 
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    """Liveness check. Intentionally does not touch the GPU."""
+    """Liveness check. Intentionally does not touch the OCR engine."""
     return HealthResponse(status="ok")
 
 
@@ -128,13 +120,15 @@ def ready() -> HealthResponse:
     return HealthResponse(status="ready")
 
 
-@app.get("/gpu", response_model=GpuResponse)
-def gpu() -> GpuResponse:
-    """Report what this process can see, whether or not CUDA is available."""
-    info = get_gpu_info()
-    return GpuResponse(
-        **info,
-        ocr_device=resolve_device(),
+@app.get("/info", response_model=InfoResponse)
+def info() -> InfoResponse:
+    """What this process is actually running: paddle build, device, engine state.
+
+    Kept separate from /ready because this must answer even when the engine is
+    dead - it is the endpoint you hit to find out why.
+    """
+    return InfoResponse(
+        **ocr.runtime_info(),
         ocr_ready=app.state.ocr_engine is not None,
     )
 
@@ -162,7 +156,7 @@ async def run_ocr(file: UploadFile = File(...)) -> OcrResponse:
 
     started = time.perf_counter()
     try:
-        # predict() is blocking GPU work, so keep it off the event loop.
+        # predict() is blocking CPU work, so keep it off the event loop.
         items = await run_in_threadpool(ocr.run_ocr, engine, image)
     except Exception as exc:  # noqa: BLE001
         logger.exception("OCR inference failed")

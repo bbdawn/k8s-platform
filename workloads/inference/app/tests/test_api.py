@@ -3,7 +3,7 @@
 Two groups:
   * the default tests never load the OCR model, so they run on any CPU machine;
   * the real inference test runs only with RUN_OCR_TESTS=1 and a working
-    PaddleOCR install (GPU or CPU).
+    PaddleOCR install.
 
 Run from the `app` directory:  pytest tests
 """
@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
-# Tests live next to the app modules, which are imported flat (main, ocr, gpu).
+# Tests live next to the app modules, which are imported flat (main, ocr).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import main  # noqa: E402
@@ -91,19 +91,20 @@ def test_ready_returns_ok_with_a_loaded_engine(ocr_client):
     assert response.json() == {"status": "ready"}
 
 
-# --- /gpu -------------------------------------------------------------------
+# --- /info ------------------------------------------------------------------
 
 
-def test_gpu_reports_state_without_crashing(client):
-    """Must answer on a CPU-only machine too, just with cuda_available=false."""
-    response = client.get("/gpu")
+def test_info_answers_even_with_a_dead_engine(client):
+    """This is the endpoint you hit to find out why a pod is not serving.
+
+    It must therefore answer when engine init failed - which is exactly what
+    this fixture simulates.
+    """
+    response = client.get("/info")
     assert response.status_code == 200
 
     body = response.json()
-    assert isinstance(body["cuda_available"], bool)
-    assert isinstance(body["gpu_count"], int)
-    assert body["ocr_device"] in {"cpu", "gpu:0"} or body["ocr_device"].startswith("gpu:")
-    # The engine is deliberately broken in this fixture.
+    assert body["device"] == "cpu"
     assert body["ocr_ready"] is False
 
 

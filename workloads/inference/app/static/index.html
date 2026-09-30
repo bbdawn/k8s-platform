@@ -102,12 +102,11 @@ const downloadAllBtn = document.getElementById("downloadAll");
 // 카드별 상태. [전체 복사]가 여기서 문자열을 모은다.
 const items = [];
 
-// Show which device the server actually runs on - the point of this workload.
-fetch("/gpu").then(r => r.json()).then(info => {
+// Show what the server actually runs on.
+fetch("/info").then(r => r.json()).then(info => {
   const badge = document.getElementById("device");
-  const onGpu = info.cuda_available;
-  badge.textContent = onGpu ? `${info.ocr_device} · ${info.gpu_name}` : info.ocr_device;
-  badge.className = onGpu ? "badge" : "badge cpu";
+  badge.textContent = info.device;
+  badge.className = "badge cpu";
 }).catch(() => {
   document.getElementById("device").textContent = "device 알 수 없음";
 });

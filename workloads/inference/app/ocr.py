@@ -14,9 +14,11 @@ import threading
 import numpy as np
 from PIL import Image, UnidentifiedImageError
 
-from gpu import resolve_device
-
 logger = logging.getLogger(__name__)
+
+# PaddleOCR still wants an explicit device string; pinning it here keeps it
+# from auto-detecting something else.
+DEVICE = "cpu"
 
 # --- configuration (all overridable via env / ConfigMap) ---------------------
 
@@ -36,8 +38,8 @@ USE_TEXTLINE_ORIENTATION = os.getenv("OCR_USE_TEXTLINE_ORIENTATION", "false").lo
 # predict(), so /health and even /ready look fine while every /ocr returns 500.
 #
 # PaddleOCR defaults this to True, so leaving it alone means no CPU inference
-# at all. Turning it off costs CPU speed and GPU is unaffected, so the CPU
-# baseline is "without oneDNN" - state that with any CPU-vs-GPU number.
+# at all. Turning it off costs inference speed, so every number this workload
+# produces is a "without oneDNN" number - state that alongside it.
 ENABLE_MKLDNN = os.getenv("OCR_ENABLE_MKLDNN", "false").lower() == "true"
 
 # Paddle's own thread count, separate from OMP_NUM_THREADS. PaddleOCR defaults
@@ -49,7 +51,7 @@ CPU_THREADS = max(1, int(os.getenv("OCR_CPU_THREADS", "2")))
 
 # A PaddleOCR predictor is not thread-safe. This caps how many predict() calls
 # may run against the shared engine at once:
-#   1 -> safe default, one GPU stream per pod (scale with replicas)
+#   1 -> safe default, one inference at a time per pod (scale with replicas)
 #   N -> allow N in-flight calls, for in-pod concurrency experiments
 MAX_CONCURRENCY = max(1, int(os.getenv("OCR_MAX_CONCURRENCY", "1")))
 
@@ -71,11 +73,10 @@ def create_ocr_engine():
     """Build the PaddleOCR engine. Called once during startup."""
     from paddleocr import PaddleOCR
 
-    device = resolve_device()
     logger.info(
         "initializing PaddleOCR (device=%s, lang=%s, textline_orientation=%s, "
         "max_concurrency=%d, mkldnn=%s, cpu_threads=%d)",
-        device,
+        DEVICE,
         OCR_LANG,
         USE_TEXTLINE_ORIENTATION,
         MAX_CONCURRENCY,
@@ -86,10 +87,9 @@ def create_ocr_engine():
     # Document orientation / unwarping are extra pipeline stages we do not need
     # for a benchmark workload; disabling them keeps runs comparable.
     # enable_mkldnn / cpu_threads reach PaddleOCR through **kwargs, which it
-    # forwards to PaddleX. Both are ignored when the device is a GPU, so the
-    # GPU image can share these lines unchanged.
+    # forwards to PaddleX.
     engine = PaddleOCR(
-        device=device,
+        device=DEVICE,
         lang=OCR_LANG,
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
@@ -99,6 +99,24 @@ def create_ocr_engine():
     )
     logger.info("PaddleOCR ready on %s", device)
     return engine
+
+
+def runtime_info() -> dict:
+    """Snapshot for the /info endpoint. Never raises.
+
+    paddle is imported lazily and guarded: a broken install must show up as a
+    reported error, not as an endpoint that 500s while we are trying to find
+    out what is wrong with the pod.
+    """
+    info = {"paddle_version": None, "device": DEVICE, "error": None}
+    try:
+        import paddle
+
+        info["paddle_version"] = paddle.__version__
+    except Exception as exc:  # noqa: BLE001 - reporting beats crashing here
+        info["error"] = f"{type(exc).__name__}: {exc}"
+        logger.warning("paddle import failed: %s", exc)
+    return info
 
 
 def warm_up(engine) -> None:

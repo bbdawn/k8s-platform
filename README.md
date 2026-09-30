@@ -1,11 +1,13 @@
 # k8s-gpu-platform
 
-Kubernetes 환경에서 NVIDIA A100 GPU를 **Full GPU / Time-slicing / MPS / MIG** 네 가지
-방식으로 공유했을 때, 동일한 AI workload의 성능이 어떻게 달라지는지 비교하는 프로젝트.
+Kubernetes에서 OCR 추론 workload를 돌리고 성능을 측정하는 프로젝트.
 
-OCR 서비스를 만드는 것이 목적이 아니다. OCR은 **재현 가능하고 측정하기 쉬운 GPU
+OCR 서비스를 만드는 것이 목적이 아니다. OCR은 **재현 가능하고 측정하기 쉬운
 workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지하고, 측정의 정확성과
-환경 간 동일성을 우선한다.
+환경 간 동일성을 우선한다. 비교 축은 **pod 개수**다(5.1).
+
+> 저장소 이름에 `gpu`가 남아 있지만, GPU 경로는 2026-09-30에 코드와 문서 모두
+> 제거했다. 이력이 필요하면 그 이전 커밋을 볼 것.
 
 ---
 
@@ -14,13 +16,13 @@ workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지
 | 항목 | 상태 |
 |---|---|
 | OCR workload (FastAPI + PaddleOCR) | ✅ 완료 |
-| CPU 환경 검증 | ✅ 완료 (수치는 8장) |
+| 로컬 검증 | ✅ 완료 (수치는 8장) |
 | 업로드 UI (정적 HTML) | ✅ 완료 |
-| Dockerfile (CPU) | ✅ 작성 완료 — 빌드는 **amd64 리눅스에서만** 가능 (4.1) |
+| Dockerfile | ✅ 완료 — 빌드는 **amd64 리눅스에서만** 가능 (4.1) |
 | Kubernetes 매니페스트 | ✅ 적용 완료 |
-| CPU 클러스터 배포 | ✅ 파드 Running — 추론 검증은 재배포 후 (4.7) |
-| GPU(A100) 검증 | ❌ 미착수 — **아직 한 번도 GPU에서 실행된 적 없음** |
-| 4개 모드 벤치마크 | ❌ 미착수 |
+| 클러스터 배포 | ✅ 파드 Running (4.7) |
+| 클러스터 추론 검증 | ⚠️ 미완 — 작은 이미지는 되지만 큰 이미지는 컨테이너가 죽는다 |
+| 벤치마크 실행 | ❌ 미착수 (6장) |
 
 ### 디렉터리
 
@@ -30,17 +32,16 @@ k8s-gpu-platform/
 │   └── k8s/                        Kubernetes 매니페스트 (4장)
 └── workloads/
     └── inference/
-        ├── Dockerfile              CPU 이미지
+        ├── Dockerfile
         ├── .dockerignore
         └── app/
-            ├── main.py              FastAPI 앱 (/, /health, /gpu, /ocr)
+            ├── main.py              FastAPI 앱 (/, /health, /ready, /info, /ocr)
             ├── ocr.py               엔진 생성·워밍업·업로드 검증·추론
-            ├── gpu.py               device 탐지 (paddle 호출을 전부 예외 처리)
             ├── requirements.txt     앱 의존성 + PaddlePaddle 설치법 주석
             ├── static/
             │   └── index.html       업로드 화면 (바닐라 JS, 빌드/npm 없음)
             └── tests/
-                └── test_api.py      테스트 8개
+                └── test_api.py      테스트 10개
 ```
 
 ---
@@ -81,31 +82,19 @@ pip install -r requirements.txt
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-### 최초 설치 — GPU
-
-```bash
-cd workloads/inference/app
-
-# 노드/베이스 이미지의 CUDA 런타임에 맞는 인덱스를 하나 고를 것
-pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
-pip install -r requirements.txt
-
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
 ### 확인
 
 - 업로드 화면: <http://localhost:8000/> — 여러 장 동시 업로드 가능
 - Swagger UI: <http://localhost:8000/docs>
 - `curl http://localhost:8000/health`
-- `curl http://localhost:8000/gpu` ← **GPU를 실제로 잡았는지 여기서 확인**
+- `curl http://localhost:8000/info` ← **엔진이 실제로 떴는지 여기서 확인**
 
 ### 테스트
 
 ```bash
 cd workloads/inference/app
-pytest tests                  # CPU 전용 7개. 모델을 로드하지 않아 어디서든 실행됨
-RUN_OCR_TESTS=1 pytest tests  # 실제 모델을 로드하는 추론 테스트까지 8개
+pytest tests                  # 8개. 모델을 로드하지 않아 어디서든 실행됨
+RUN_OCR_TESTS=1 pytest tests  # 실제 모델을 로드하는 2개까지 더해 10개
 ```
 
 ---
@@ -115,8 +104,9 @@ RUN_OCR_TESTS=1 pytest tests  # 실제 모델을 로드하는 추론 테스트�
 | 엔드포인트 | 설명 |
 |---|---|
 | `GET /` | 업로드 화면 |
-| `GET /health` | liveness. GPU를 건드리지 않음 |
-| `GET /gpu` | CUDA/paddle device 상태. **GPU가 없어도 200을 반환** |
+| `GET /health` | liveness. OCR 엔진을 건드리지 않음 |
+| `GET /ready` | readiness. 엔진이 없으면 503 + 원인 |
+| `GET /info` | paddle 버전 / device / 엔진 상태. **엔진이 죽어 있어도 200을 반환** |
 | `POST /ocr` | jpg/png 1장 → 텍스트 + confidence |
 
 `POST /ocr` 응답:
@@ -169,7 +159,6 @@ ConfigMap으로 분리하기 쉽도록 모든 설정을 환경변수로 뺐다.
 
 | 변수 | 기본값 | 용도 |
 |---|---|---|
-| `OCR_DEVICE` | `auto` | `cpu` / `gpu:0` 강제 지정 |
 | `OCR_LANG` | `korean` | 인식 언어 모델 |
 | `OCR_MAX_CONCURRENCY` | `1` | 동시 `predict()` 허용 수 (아래 5장 참고) |
 | `OCR_WARMUP` | `true` | 시작 시 워밍업 추론 |
@@ -183,8 +172,7 @@ ConfigMap으로 분리하기 쉽도록 모든 설정을 환경변수로 뺐다.
 
 ## 4. 배포 (Kubernetes)
 
-CPU 클러스터에 올리는 것까지가 현재 목표다. GPU 이미지는 **베이스 이미지와
-paddle 설치 줄, 두 곳만** 달라진다.
+클러스터에 올려 매니페스트와 이미지를 검증하는 것이 이 장의 목표다.
 
 ```
 deploy/k8s/
@@ -194,7 +182,7 @@ deploy/k8s/
 ├── service.yaml         NodePort 30800
 └── kustomization.yaml   이미지 이름을 여기서 갈아끼운다
 
-workloads/inference/Dockerfile   CPU 이미지
+workloads/inference/Dockerfile   워크로드 이미지
 ```
 
 ### 4.1 빌드는 amd64 리눅스에서 해야 한다
@@ -235,8 +223,8 @@ docker build -t nexus.<사내도메인>:8082/ocr-workload:0.1.0-cpu workloads/in
 
 ### 4.2 레지스트리 없이 — 노드에서 빌드해 바로 쓰기
 
-**현재 이 프로젝트가 쓰는 경로다.** 사내 Nexus/Jenkins를 쓸 수 없고, 이미지 종류는
-CPU판/GPU판 둘뿐이라 레지스트리와 CI를 새로 세울 이유가 없다. 클러스터 노드가
+**현재 이 프로젝트가 쓰는 경로다.** 사내 Nexus/Jenkins를 쓸 수 없고, 이미지가
+하나뿐이라 레지스트리와 CI를 새로 세울 이유가 없다. 클러스터 노드가
 곧 amd64 빌드 머신이므로 4.1의 AVX 문제도 같이 해결된다.
 
 ```bash
@@ -284,7 +272,7 @@ kubectl -n ocr-bench get pods
 kubectl -n ocr-bench logs deploy/ocr | head -20   # "PaddleOCR ready on cpu"
 
 curl http://<노드IP>:30800/health
-curl http://<노드IP>:30800/gpu     # cuda_available: false, ocr_device: cpu 가 정상
+curl http://<노드IP>:30800/info    # device: cpu, ocr_ready: true 가 정상
 ```
 
 NodePort를 못 쓰는 환경이면 `kubectl -n ocr-bench port-forward svc/ocr 8000:8000`.
@@ -303,8 +291,7 @@ worker2  ← k6 / hey (부하 생성)
 
 `nodeSelector`는 이미지 위치 때문만이 아니라 측정 설계상으로도 필요하다. 고정하지
 않으면 replica를 늘렸을 때 스케줄러가 worker들에 나눠 배치하고, `elapsed_ms`에
-**서로 다른 두 머신의 수치가 섞인다.** A100이 붙으면 어차피 GPU 노드 한 대에
-전부 몰아야 하므로, 지금 그 구성을 그대로 쓰는 셈이다.
+**서로 다른 두 머신의 수치가 섞인다.**
 
 ### 4.5 CPU 배포에서 주의할 것
 
@@ -314,7 +301,7 @@ worker2  ← k6 / hey (부하 생성)
 - **기동이 느리다.** 모델 로드 + 워밍업이 수십 초라서 `startupProbe`를
   5초 × 60회로 잡아 두었다. 이게 없으면 liveness가 부팅 중인 pod을 죽인다.
 - OCR 엔진 초기화가 실패해도 pod은 뜬다(7장 설계 의도). `Running`인데 `/ocr`이
-  503이면 `/gpu`의 `error` 필드를 먼저 볼 것.
+  503이면 `/ready`의 detail과 `/info`의 `error` 필드를 먼저 볼 것.
 - **이 단계의 목적은 매니페스트와 이미지 검증이지 성능 측정이 아니다.**
   CPU 수치는 8장에 있고, 노드 사양이 다르면 비교 대상도 안 된다.
 
@@ -414,26 +401,9 @@ liveness를 `/ready`로 걸면 초기화 실패 시 무한 재시작에 빠져 �
 
 ## 5. 벤치마크 설계
 
-### 5.1 GPU 공유 방식별 특성
+### 5.1 동시성을 어디서 올릴 것인가
 
-**핵심: "GPU니까 병렬"이 아니다.** 기본적으로 한 GPU에서 서로 다른 프로세스의
-커널은 동시에 실행되지 않고, CUDA가 컨텍스트를 시분할해 번갈아 돌린다.
-네 가지 모드는 정확히 이 지점에서 갈린다.
-
-| 모드 | 진짜 동시 실행 | 메모리 격리 | 특징 |
-|---|---|---|---|
-| **Full GPU** | ❌ 프로세스 1개 독점 | — | 작은 추론은 A100을 다 못 채워 GPU가 논다 |
-| **Time-slicing** | ❌ 시분할 | ❌ 없음 (OOM 전파) | 처리량은 안 늘고 지연만 증가. 목적은 속도가 아니라 "노는 GPU 나눠쓰기" |
-| **MPS** | ✅ 커널 동시 실행 | ❌ 약함 | CUDA 컨텍스트 공유. 각 프로세스가 GPU를 못 채울 때 처리량이 실제로 오름 |
-| **MIG** | ✅ 하드웨어 파티션 | ✅ 강함 | 격리 보장. 단 파티션 1개는 A100 전체보다 작음 |
-
-**가설 (미검증):** 이 workload는 영수증 1장 = 작은 추론이라 A100을 다 못 채운다.
-따라서 **MPS에서 가장 큰 처리량 이득**이 나올 것으로 예상한다. 이 프로젝트의
-핵심 관전 포인트다.
-
-### 5.2 동시성을 어디서 올릴 것인가
-
-CPU에서 측정한 결과가 설계 근거를 제공한다 (영수증 1장 반복, 8장 참고):
+측정 결과가 설계 근거를 제공한다 (영수증 1장 반복, 8장 참고):
 
 ```
 OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
@@ -446,26 +416,25 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
 **처리량이 완전히 동일하다.** 연산 장치가 이미 포화 상태라 프로세스 내부에서
 스레드를 늘려도 처리량은 늘지 않고 지연만 나빠진다.
 
-→ **비교 축은 pod(프로세스) 개수여야 한다.** MPS가 이득을 내는 것도 멀티
-*프로세스*에서다. `OCR_MAX_CONCURRENCY=1`을 기본값으로 두고 replica를 늘리는
-것이 맞는 설계인 이유다.
+→ **비교 축은 pod(프로세스) 개수여야 한다.** `OCR_MAX_CONCURRENCY=1`을 기본값으로
+두고 replica를 늘리는 것이 맞는 설계인 이유다.
 
 - ❌ pod 내부 스레드 동시성 늘리기
-- ✅ pod 개수 × GPU 공유 모드 조합 비교
+- ✅ pod 개수를 늘려 비교
 
-### 5.3 측정 지표
+### 5.2 측정 지표
 
 | 지표 | 출처 |
 |---|---|
 | 추론 지연 (p50/p95/p99) | 응답의 `elapsed_ms` |
 | 처리량 (req/s) | 부하 도구 집계 |
-| GPU 이용률 / 메모리 | `nvidia-smi`, DCGM exporter |
-| 모드별 격리 실패 | OOM 발생 여부, 이웃 pod 영향 |
+| 노드 CPU / 메모리 | `kubectl top`, node-exporter |
+| 이웃 pod 영향 | OOM 발생 여부, 같은 노드 pod의 지연 변화 |
 
 부하는 `k6` / `hey` 같은 도구로 건다. **UI는 기능 확인용이지 측정용이 아니다** —
 브라우저·네트워크·JS 타이머 노이즈가 섞인다.
 
-### 5.4 측정 정확도를 위해 이미 반영한 것
+### 5.3 측정 정확도를 위해 이미 반영한 것
 
 - OCR 모델은 lifespan에서 **1회 초기화 후 재사용** → 모델 로딩 시간이 측정에 안 섞임
 - 시작 시 **워밍업 추론 1회** → 첫 요청의 lazy-load 지연 제거
@@ -476,59 +445,48 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
 
 ## 6. 앞으로 확인해야 할 것
 
-### 6.1 GPU 환경 구축
+### 6.1 클러스터 추론 검증 (최우선)
 
-- [x] ~~Dockerfile 작성~~ — CPU판 완료. **GPU판은 베이스 이미지 CUDA 버전과 paddle 인덱스(`cu118`/`cu126`/`cu129`)를 반드시 일치시킬 것**
-- [ ] 이미지 빌드 & 레지스트리 푸시
-- [x] ~~Kubernetes 매니페스트 (Deployment, Service, ConfigMap)~~ — CPU 기준 완료, GPU는 `resources.limits`에 `nvidia.com/gpu` 추가 필요
-- [ ] NVIDIA device plugin / GPU Operator 설치 상태 확인
+- [ ] **큰 이미지에서 컨테이너가 죽는 문제 해결** — 1512×2016 이상이면 응답 없이
+      연결이 끊긴다. 640×480은 통과한다. 파드는 1~2분 뒤 스스로 복구된다
+- [ ] 파드 `limits`를 노드보다 작게 내릴 것 — 현재 `cpu 2 / memory 4Gi`가 노드
+      전체(2C4M)와 같아, 메모리를 넘겨도 `OOMKilled`로 기록되지 않고 노드가 먼저 흔들린다
+- [ ] `text_det_limit_side_len`으로 탐지 입력 크기를 고정 — 메모리와 속도를 동시에
+      잡고, 벤치마크에서는 어차피 고정해야 하는 값이다
+- [ ] 한글 영수증 인식 결과가 로컬(8장)과 **동일한가**
+- [ ] `RUN_OCR_TESTS=1 pytest tests` 10개 통과
 
-### 6.2 GPU 동작 검증 (최우선)
-
-- [ ] `GET /gpu`가 `cuda_available: true`, `gpu_name: NVIDIA A100...`을 반환하는가
-- [ ] 로그에 `initializing PaddleOCR (device=gpu:0 ...)`가 찍히는가
-- [ ] `RUN_OCR_TESTS=1 pytest tests` 8개 통과
-- [ ] 한글 영수증 인식 결과가 CPU와 **동일한가** (GPU/CPU 커널 차이로 결과가 갈리면 비교가 무의미)
-- [ ] `elapsed_ms`가 CPU 대비 얼마나 줄어드는가 (CPU 기준값: **약 1,400ms**)
-- [ ] `nvidia-smi`로 실제 GPU 메모리 점유 확인
-
-### 6.3 모드별 환경 구성
-
-- [ ] **Full GPU** — 기준선(baseline) 확보
-- [ ] **Time-slicing** — device plugin ConfigMap에 `replicas` 설정
-- [ ] **MPS** — MPS daemon 구성
-- [ ] **MIG** — A100 파티션 분할. 사용 가능한 프로파일이 **40GB / 80GB 모델에 따라 다르므로**
-      (`nvidia-smi mig -lgip`로 확인) 먼저 보유 장비를 확정할 것. 프로파일별 비교 여부도 결정 필요
-
-### 6.4 벤치마크 실행
+### 6.2 벤치마크 실행
 
 - [ ] 부하 도구 선정 및 시나리오 스크립트 작성
 - [ ] 고정할 변수 정의 (이미지 크기, 요청 수, 워밍업 요청 수, 측정 시간)
-- [ ] 4개 모드 × pod 개수(1/2/4/8) 매트릭스 측정
+- [ ] pod 개수(1/2/4/8) 측정
 - [ ] 결과 표/그래프 정리
 
-### 6.5 열려 있는 결정 사항
+### 6.3 열려 있는 결정 사항
 
-- [ ] 인식 모델 조합을 고정할 것인가 — 현재 검출은 `PP-OCRv5_server_det`, 인식은 `korean_PP-OCRv5_mobile_rec`가 자동 선택된다. **server/mobile 조합에 따라 GPU 이용률이 크게 달라지므로** 벤치마크 변수로 삼을지 고정할지 결정 필요
-- [ ] 입력 이미지를 1종으로 고정할지, 크기별로 나눌지 (작은 이미지는 GPU를 못 채운다)
+- [ ] 인식 모델 조합을 고정할 것인가 — 현재 검출은 `PP-OCRv5_server_det`, 인식은
+      `korean_PP-OCRv5_mobile_rec`가 자동 선택된다. server판 검출은 무거우므로
+      벤치마크 변수로 삼을지, mobile로 고정할지 결정 필요
+- [ ] 입력 이미지를 1종으로 고정할지, 크기별로 나눌지
 - [ ] 모델 파일을 이미지에 굽을지, PVC/initContainer로 뺄지 (pod 기동 시간에 영향)
 - [ ] 배치 추론(`predict()`에 리스트 전달) 시나리오를 별도 축으로 추가할지
+- [ ] 측정 대상 노드를 키울지 — 2C4M은 파드 하나가 노드를 다 쓰는 크기라
+      시스템 구성요소와 CPU를 다툰다
 
 ---
 
 ## 7. 알려진 제약 / 주의사항
 
-- **`paddlepaddle-gpu`는 PyPI에 없다.** CUDA별 전용 인덱스에서 받아야 하며,
-  `-i` 옵션이 전체 인덱스를 덮어쓰기 때문에 `requirements.txt`에 넣을 수 없다.
-  설치법은 `requirements.txt` 주석에 문서화되어 있다.
 - **Python 3.9 ~ 3.13만 지원.** PaddlePaddle 3.3.x는 3.14 휠을 제공하지 않는다.
   이미지는 `python:3.11` 또는 `3.12`로 빌드할 것.
 - **PaddleOCR predictor는 thread-safe하지 않다.** `OCR_MAX_CONCURRENCY` 기본값 1이
   이를 보장한다. 올리려면 결과 정합성을 먼저 검증할 것.
 - 모델은 첫 실행 시 `~/.paddlex/official_models/`로 다운로드된다. 컨테이너에서는
   이 경로가 기동 시간과 이미지 크기에 직접 영향을 준다.
-- OCR 엔진 초기화가 실패해도 앱은 뜬다. `/gpu`가 원인을 노출하고 `/ocr`은 503을
-  반환한다. CrashLoopBackOff 대신 원인이 보이도록 한 의도적 설계다.
+- OCR 엔진 초기화가 실패해도 앱은 뜬다. `/ready`가 503으로 원인을 노출하고
+  `/info`는 200으로 상태를 알려준다. CrashLoopBackOff 대신 원인이 보이도록 한
+  의도적 설계다.
 - **oneDNN을 켜면 CPU 추론이 전부 실패한다.** paddle 3.3.1의 PIR 실행기가 이
   파이프라인이 만드는 oneDNN 커널을 처리하지 못한다.
 
@@ -541,10 +499,9 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
   PaddleOCR 기본값이 `enable_mkldnn=True`라서, 그대로 두면 CPU 추론이 아예
   안 된다. `OCR_ENABLE_MKLDNN=false`가 기본값인 이유다.
 
-  **이것이 CPU 수치에 미치는 영향을 반드시 같이 적어야 한다.** oneDNN은 CPU 추론
-  가속 라이브러리이므로 끄면 CPU가 느려지고, GPU 경로는 영향을 받지 않는다.
-  즉 CPU/GPU 비교의 CPU 쪽은 **"가속을 끈 CPU"** 값이다. paddle을 올려 고쳐지면
-  다시 측정해 비교할 것.
+  **이것이 수치에 미치는 영향을 반드시 같이 적어야 한다.** oneDNN은 CPU 추론
+  가속 라이브러리이므로 끄면 그만큼 느려진다. 즉 이 프로젝트의 모든 수치는
+  **"가속을 끈"** 값이다. paddle을 올려 고쳐지면 다시 측정해 비교할 것.
 
   엔진 생성과 모델 로드는 성공하고 첫 `predict()`에서 죽는다. 그래서 `/health`도
   `/ready`도 통과하는데 `/ocr`만 500이 된다 — 파드가 Ready인 것이 추론 가능을
@@ -558,14 +515,14 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
 
 ## 8. 검증 기록
 
-### CPU (2026-09-13, macOS arm64 / Python 3.12 / paddlepaddle 3.3.1 / paddleocr 3.7.0)
+### 로컬 (2026-09-13, macOS arm64 / Python 3.12 / paddlepaddle 3.3.1 / paddleocr 3.7.0)
 
 ```
 pytest              8 passed (실제 추론 테스트 포함)
-GET /gpu            cuda_available: false, ocr_device: cpu, ocr_ready: true
+GET /info           device: cpu, ocr_ready: true
 POST /ocr (영수증)   10건 인식, confidence 0.936 ~ 0.9999, elapsed_ms 1400~1560
 POST /ocr (영수증2)  7건 인식
-동시성              MAX_CONCURRENCY 1/4 모두 0.72 req/s (5.2 참고)
+동시성              MAX_CONCURRENCY 1/4 모두 0.72 req/s (5.1 참고)
 ```
 
 한글 영수증 10줄을 **전부 정확히** 인식했다. 실제 인식 결과:
@@ -575,6 +532,6 @@ POST /ocr (영수증2)  7건 인식
 치즈케이크 · 6,500 · 합계 · 16,000 · 2026-09-13 14:22
 ```
 
-### GPU
+### 클러스터
 
-아직 실행된 적 없음.
+아직 추론 검증이 끝나지 않았다. 6.1 참고.

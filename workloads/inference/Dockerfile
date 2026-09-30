@@ -1,8 +1,4 @@
-# OCR inference workload - CPU 이미지.
-#
-# Kubernetes 배포 경로(빌드/레지스트리/매니페스트/헬스체크)를 GPU 문제와 분리해
-# 먼저 검증하기 위한 이미지. GPU 이미지는 베이스와 paddle 설치 줄만 다르며,
-# 노드의 CUDA 버전을 확정한 뒤 스테이지로 추가한다.
+# OCR inference workload 이미지.
 #
 #   build:  docker build --platform linux/amd64 -t ocr-workload:cpu workloads/inference
 #   run:    docker run --rm -p 8000:8000 ocr-workload:cpu
@@ -52,8 +48,8 @@ WORKDIR /app
 # 의존성 레이어를 먼저 만들어 둔다. 앱 코드만 고치면 재설치하지 않는다.
 COPY app/requirements.txt .
 
-# PaddlePaddle은 requirements.txt에 없다(CUDA별 전용 인덱스가 필요해 분리해 둠).
-# CPU 빌드는 PyPI의 일반 패키지를 쓴다.
+# PaddlePaddle은 requirements.txt에 없다. 여기서 따로 설치해 레이어를 나눠 두면
+# 앱 의존성이 바뀌어도 1.4GB짜리 재설치를 피할 수 있다.
 RUN pip install paddlepaddle==3.3.1 \
  && pip install -r requirements.txt
 
