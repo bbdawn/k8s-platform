@@ -97,7 +97,7 @@ def create_ocr_engine():
         enable_mkldnn=ENABLE_MKLDNN,
         cpu_threads=CPU_THREADS,
     )
-    logger.info("PaddleOCR ready on %s", device)
+    logger.info("PaddleOCR ready on %s", DEVICE)
     return engine
 
 
