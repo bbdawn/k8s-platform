@@ -31,9 +31,9 @@ import ocr  # noqa: E402
 REAL_CREATE_OCR_ENGINE = ocr.create_ocr_engine
 
 
-def make_png(text: str = "TEST 12345") -> bytes:
+def make_png(text: str = "TEST 12345", size: tuple[int, int] = (480, 160)) -> bytes:
     """Small in-memory PNG with some text on it."""
-    image = Image.new("RGB", (480, 160), "white")
+    image = Image.new("RGB", size, "white")
     ImageDraw.Draw(image).text((20, 60), text, fill="black")
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
@@ -69,6 +69,30 @@ def test_health_returns_ok(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- image decoding ---------------------------------------------------------
+
+
+def test_phone_sized_image_is_downscaled():
+    """A full-resolution phone photo must never reach PaddleOCR as-is.
+
+    At 3024x4032 the float32 copies the pipeline makes run to ~140MB each,
+    which is enough to get the container killed mid-request on a memory-limited
+    pod. The client then sees the connection drop with no status code, so the
+    failure is invisible from the outside - this is cheaper to assert here.
+    """
+    array = ocr.decode_image(make_png(size=(3024, 4032)))
+    height, width = array.shape[:2]
+    assert max(width, height) == ocr.MAX_IMAGE_SIDE
+    # Aspect ratio survives: 3024/4032 == 0.75.
+    assert round(width / height, 2) == 0.75
+
+
+def test_small_image_is_not_touched():
+    """Downscaling only kicks in above the cap; smaller images pass through."""
+    array = ocr.decode_image(make_png(size=(640, 480)))
+    assert array.shape[:2] == (480, 640)
 
 
 # --- /ready -----------------------------------------------------------------

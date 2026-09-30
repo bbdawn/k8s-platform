@@ -58,6 +58,25 @@ MAX_CONCURRENCY = max(1, int(os.getenv("OCR_MAX_CONCURRENCY", "1")))
 # Reject oversized uploads before decoding them.
 MAX_IMAGE_BYTES = int(os.getenv("OCR_MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))
 
+# Cap the longer side of the decoded image. 0 disables it.
+#
+# Phone cameras produce 3000-4000px photos. At full size the pipeline holds the
+# decoded array plus float32 copies of it (3024x4032 RGB is 36MB as uint8 and
+# 146MB as float32, and there is more than one copy in flight), which is enough
+# to get the container killed mid-request on a 4Gi pod. The client sees the
+# connection drop with no status code - "TypeError: Failed to fetch" in the
+# browser, curl exit 52 - because nothing is left to answer with. A laptop with
+# 16GB never reaches this, so it only appears once the workload is in a
+# container with a limit.
+#
+# Downscaling here rather than through PaddleOCR's text_det_limit_side_len is
+# deliberate: that setting bounds the detection input only, while recognition
+# still crops from the array we pass in. Capping the array bounds both.
+#
+# It also pins input size, which the benchmark needs anyway - otherwise the
+# numbers depend on whatever resolution the phone happened to produce.
+MAX_IMAGE_SIDE = int(os.getenv("OCR_MAX_IMAGE_SIDE", "1600"))
+
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_IMAGE_FORMATS = {"JPEG", "PNG"}
@@ -139,6 +158,20 @@ def validate_upload(filename: str | None, content_type: str | None) -> None:
         raise ImageError(f"unsupported content type '{content_type}', allowed: image/jpeg, image/png")
 
 
+def _downscale(image: Image.Image) -> Image.Image:
+    """Shrink the image so its longer side is at most MAX_IMAGE_SIDE."""
+    if MAX_IMAGE_SIDE <= 0 or max(image.size) <= MAX_IMAGE_SIDE:
+        return image
+
+    ratio = MAX_IMAGE_SIDE / max(image.size)
+    resized = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))
+    logger.info(
+        "downscaled %dx%d -> %dx%d", image.width, image.height, resized[0], resized[1]
+    )
+    # LANCZOS keeps small text legible; the cheaper filters smear it.
+    return image.resize(resized, Image.LANCZOS)
+
+
 def decode_image(raw: bytes) -> np.ndarray:
     """Decode uploaded bytes into a BGR numpy array, entirely in memory."""
     if not raw:
@@ -151,7 +184,7 @@ def decode_image(raw: bytes) -> np.ndarray:
             image_format = image.format
             if image_format not in ALLOWED_IMAGE_FORMATS:
                 raise ImageError(f"unsupported image format '{image_format}', allowed: JPEG, PNG")
-            rgb = image.convert("RGB")
+            rgb = _downscale(image.convert("RGB"))
             array = np.asarray(rgb)
     except ImageError:
         raise

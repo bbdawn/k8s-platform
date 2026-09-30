@@ -9,6 +9,12 @@ data:
   # threads - see README section 5.1.
   OCR_MAX_CONCURRENCY: "1"
 
+  # 업로드 이미지의 긴 변을 이 값으로 줄인 뒤 추론한다. 0이면 끄는데, 끄면
+  # 휴대폰 사진(3000~4000px)이 들어왔을 때 float32 사본이 파드 메모리를 넘겨
+  # 컨테이너가 요청 처리 중에 죽는다. 클라이언트는 상태 코드도 없이 연결이
+  # 끊기는 것만 본다. 벤치마크에서 입력 크기를 고정하는 역할도 겸한다.
+  OCR_MAX_IMAGE_SIDE: "1600"
+
   OCR_WARMUP: "true"
   OCR_USE_TEXTLINE_ORIENTATION: "false"
   LOG_LEVEL: "INFO"
