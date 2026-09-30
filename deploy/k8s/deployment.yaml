@@ -74,17 +74,27 @@ spec:
           #   Killing: Container ocr failed liveness probe, will be restarted
           # Leaving 500m for the system is what stops that.
           #
-          # memory is 2560Mi, well under allocatable. The previous 4Gi was
-          # *larger* than the node could actually give, so an overrun would
-          # have destabilized the node instead of producing a clean OOMKilled
-          # on this container - a failure with no readable cause.
+          # memory is 3Gi. 2560Mi was not enough: recognition on a 1200x1600
+          # image went over it and the container was OOMKilled mid-request.
+          #
+          # Keep it under allocatable (3810Mi on this node), which is the whole
+          # point. The original 4Gi was *larger* than the node could give, so an
+          # overrun starved the node before the container hit its own limit -
+          # the kill then showed up as SIGTERM/Error with failing probes, which
+          # reads like a probe problem and is not one. Under allocatable, the
+          # same overrun is a clean OOMKilled on this container. Being wrong on
+          # the low side leaves a readable cause; being wrong on the high side
+          # does not.
+          #
+          # ~740Mi is left for calico, kube-proxy and the eviction threshold.
+          # There is not much room above this on a 4GB node.
           resources:
             requests:
               cpu: "1500m"
-              memory: 2560Mi
+              memory: 3Gi
             limits:
               cpu: "1500m"
-              memory: 2560Mi
+              memory: 3Gi
           # Two endpoints on purpose:
           #   /ready  503 until the OCR engine is loaded
           #   /health 200 as soon as the process is up, engine or not

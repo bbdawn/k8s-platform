@@ -563,11 +563,22 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
   | `limits.cpu` | `1500m` | 노드에 500m를 남긴다 |
   | `OMP_NUM_THREADS` / `OCR_CPU_THREADS` | `1` | 컨테이너 안에서도 uvicorn 몫을 남긴다 |
   | `timeoutSeconds` | `5` | 기본 1초는 부하 중에 너무 짧다 |
-  | `limits.memory` | `2560Mi` | 피크 1282Mi, allocatable 3810Mi |
+  | `limits.memory` | `3Gi` | 2560Mi는 인식 단계에서 넘쳤다. allocatable 3810Mi |
 
   메모리를 allocatable보다 크게(`4Gi`) 잡아 두면, 넘쳤을 때 컨테이너만
   `OOMKilled`로 죽지 않고 노드가 먼저 흔들려 원인이 보이지 않는다. **낮게
-  틀리는 쪽이 낫다.**
+  틀리는 쪽이 낫다.** 실제로 한도를 allocatable 아래로 내리자마자 같은 증상이
+  `SIGTERM`에서 `OOMKilled / exit 137`로 바뀌어 원인이 드러났다.
+
+- **워밍업이 인식 단계를 검증하지 않았다.** 워밍업이 흰 이미지를 쓰면 검출이
+  아무것도 못 찾아 **인식 단계가 실행되지 않는다.** `warm-up inference finished`가
+  찍힌 파드가 글자 있는 첫 요청에서 `OOMKilled`로 죽었다. 절반만 확인하는
+  워밍업은 확인이 아니다. 지금은 사각형 몇 개를 그려 검출이 상자를 내놓게 한다.
+
+- **인식 단계가 메모리를 크게 쓴다.** 1200×1600 입력에서 `2560Mi`를 넘겼다.
+  검출은 `PP-OCRv5_server_det`(무거운 server판)이 자동 선택된다. 메모리가 계속
+  모자라면 `text_detection_model_name`으로 mobile판을 쓰거나
+  `OCR_MAX_IMAGE_SIDE`를 더 내리는 것이 다음 수단이다(6.3).
 
 - **스레드 수를 두 군데서 맞춰야 한다.** `OMP_NUM_THREADS`(OpenMP)와 paddle 자체의
   `cpu_threads`는 별개다. 후자의 PaddleOCR 기본값이 **10**이라 컨테이너의 CPU

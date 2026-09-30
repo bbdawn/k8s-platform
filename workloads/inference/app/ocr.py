@@ -138,9 +138,25 @@ def runtime_info() -> dict:
     return info
 
 
+def _warm_up_image() -> np.ndarray:
+    """A small image with actual marks on it, for warm-up.
+
+    Not a blank canvas. Detection finds nothing on blank white, so recognition
+    never runs and warm-up proves only half the pipeline. That gap hid a real
+    failure: "warm-up inference finished" was logged by a pod that then died
+    with OOMKilled on the first request carrying text.
+    """
+    image = np.full((320, 320, 3), 255, dtype=np.uint8)
+    # A few filled rectangles are enough for detection to emit boxes and hand
+    # them to recognition. No font needed, so this works in any base image.
+    for row in range(60, 260, 70):
+        image[row : row + 24, 40:280] = 0
+    return image
+
+
 def warm_up(engine) -> None:
     """Run one throwaway inference so the first real request is not the slowest."""
-    blank = np.full((320, 320, 3), 255, dtype=np.uint8)
+    blank = _warm_up_image()
     try:
         run_ocr(engine, blank)
         logger.info("warm-up inference finished")
