@@ -1,13 +1,10 @@
-# k8s-gpu-platform
+# k8s-platform
 
 Kubernetes에서 OCR 추론 workload를 돌리고 성능을 측정하는 프로젝트.
 
 OCR 서비스를 만드는 것이 목적이 아니다. OCR은 **재현 가능하고 측정하기 쉬운
 workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지하고, 측정의 정확성과
 환경 간 동일성을 우선한다. 비교 축은 **pod 개수**다(5.1).
-
-> 저장소 이름에 `gpu`가 남아 있지만, GPU 경로는 2026-09-30에 코드와 문서 모두
-> 제거했다. 이력이 필요하면 그 이전 커밋을 볼 것.
 
 ---
 
@@ -27,7 +24,7 @@ workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지
 ### 디렉터리
 
 ```
-k8s-gpu-platform/
+k8s-platform/
 ├── deploy/
 │   └── k8s/                        Kubernetes 매니페스트 (4장)
 └── workloads/
