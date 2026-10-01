@@ -25,6 +25,23 @@ DEVICE = "cpu"
 # PaddleOCR 인식 언어 모델. korean / en / ch / japan 등.
 OCR_LANG = os.getenv("OCR_LANG", "korean")
 
+# 검출 모델. 빈 문자열이면 PaddleOCR 기본값을 쓴다(lang=korean이면 server판).
+#
+# 기본값으로 두는 것이 맞다. mobile판으로 바꾸면 2코어 노드의 메모리 문제가
+# 풀릴 것 같지만, 한국어를 읽지 못한다. 맥에서 같은 영수증으로 잰 값:
+#
+#   검출              elapsed_ms   RSS      인식 결과
+#   server(기본값)       6,200ms   2,628MB   한글 10줄 전부 정확
+#   PP-OCRv5_mobile_det  1,400ms   1,782MB   숫자만. 한글은 confidence 0.0, 빈 문자열
+#
+# 4.5배 빠르고 메모리도 800MB 적지만 쓸 수 없다. 더 고약한 것은 **count가 10으로
+# 똑같다**는 점이다. 검출은 상자를 10개 그대로 찾아내고 인식만 실패하므로,
+# "10건 인식됨"만 보는 검증은 이 고장을 통과시킨다. 바꿀 일이 있으면 건수가
+# 아니라 텍스트 내용을 비교할 것.
+#
+# 벤치마크에서는 이 값을 고정해 둘 것. 검출 모델이 바뀌면 수치를 비교할 수 없다.
+DET_MODEL = os.getenv("OCR_DET_MODEL", "").strip()
+
 # 텍스트 줄 방향 분류는 추론 시간을 더 쓴다. 벤치마크가 검출 + 인식만 재도록
 # 기본값은 꺼 둔다.
 USE_TEXTLINE_ORIENTATION = os.getenv("OCR_USE_TEXTLINE_ORIENTATION", "false").lower() == "true"
@@ -92,10 +109,11 @@ def create_ocr_engine():
     from paddleocr import PaddleOCR
 
     logger.info(
-        "initializing PaddleOCR (device=%s, lang=%s, textline_orientation=%s, "
-        "max_concurrency=%d, mkldnn=%s, cpu_threads=%d)",
+        "initializing PaddleOCR (device=%s, lang=%s, det_model=%s, "
+        "textline_orientation=%s, max_concurrency=%d, mkldnn=%s, cpu_threads=%d)",
         DEVICE,
         OCR_LANG,
+        DET_MODEL or "(PaddleOCR 기본값)",
         USE_TEXTLINE_ORIENTATION,
         MAX_CONCURRENCY,
         ENABLE_MKLDNN,
@@ -106,6 +124,9 @@ def create_ocr_engine():
     # 꺼 두어야 실행 간 비교가 가능하다.
     # enable_mkldnn / cpu_threads는 **kwargs를 통해 PaddleOCR에 들어가고,
     # PaddleOCR이 그대로 PaddleX에 넘긴다.
+    # 빈 값이면 인자를 아예 넘기지 않는다. PaddleOCR이 기본값을 고르게 둔다.
+    det_kwargs = {"text_detection_model_name": DET_MODEL} if DET_MODEL else {}
+
     engine = PaddleOCR(
         device=DEVICE,
         lang=OCR_LANG,
@@ -114,6 +135,7 @@ def create_ocr_engine():
         use_textline_orientation=USE_TEXTLINE_ORIENTATION,
         enable_mkldnn=ENABLE_MKLDNN,
         cpu_threads=CPU_THREADS,
+        **det_kwargs,
     )
     logger.info("PaddleOCR ready on %s", DEVICE)
     return engine

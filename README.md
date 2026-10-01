@@ -18,7 +18,8 @@ workload**로서만 존재한다. 따라서 OCR 기능은 최소한으로 유지
 | Dockerfile | ✅ 완료 — 빌드는 **amd64 리눅스에서만** 가능 (4.1) |
 | Kubernetes 매니페스트 | ✅ 적용 완료 |
 | 클러스터 배포 | ✅ 파드 Running (4.7) |
-| 클러스터 추론 검증 | ⚠️ 진행 중 — 엔드포인트·추론 동작 확인. 실제 영수증 수치는 아직 |
+| 로컬 추론 검증 | ✅ 한글 영수증 10줄 전부 인식 (8장) |
+| 클러스터 추론 검증 | ❌ 막힘 — 노드가 2C4M이라 `OOMKilled` (6.1) |
 | 벤치마크 실행 | ❌ 미착수 (6장) |
 
 ### 디렉터리
@@ -161,6 +162,7 @@ ConfigMap으로 분리하기 쉽도록 모든 설정을 환경변수로 뺐다.
 | `OCR_WARMUP` | `true` | 시작 시 워밍업 추론 |
 | `OCR_MAX_IMAGE_BYTES` | `10485760` | 업로드 크기 제한 |
 | `OCR_MAX_IMAGE_SIDE` | `1600` | 추론 전 긴 변을 이 값으로 축소. `0`이면 끔 (7장) |
+| `OCR_DET_MODEL` | (빈값) | 검출 모델. 비우면 PaddleOCR 기본값. **mobile판은 한글을 못 읽는다** (7장) |
 | `OCR_USE_TEXTLINE_ORIENTATION` | `false` | 방향 분류. 측정 일관성을 위해 off |
 | `OCR_ENABLE_MKLDNN` | `false` | oneDNN. **켜면 CPU 추론이 죽는다** (7장) |
 | `OCR_CPU_THREADS` | `2` | paddle `cpu_threads`. CPU limit과 맞출 것 |
@@ -466,10 +468,14 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
 - [x] ~~파드 `limits`를 노드보다 작게 내릴 것~~ — 실측(피크 1282Mi / allocatable
       3810Mi)으로 `cpu 1500m / memory 2560Mi`, requests와 동일하게 잡아
       Guaranteed QoS로 두었다 (7장)
-- [ ] 실제 영수증으로 추론이 끝까지 도는지 확인 — probe 타임아웃과 CPU 몫을
-      고친 뒤 아직 검증하지 않았다
-- [ ] 추론 중 `memory.peak`을 다시 재서 `limits.memory`를 조일 것 — 1282Mi는
-      실제 추론을 하지 않은 컨테이너의 값이다
+- [x] ~~실제 영수증으로 추론이 끝까지 도는지 확인~~ — 맥 로컬에서는 완전히
+      동작한다(한글 10줄, 6.2초). 같은 요청이 클러스터에서는 `OOMKilled`다.
+      코드가 아니라 노드 크기 문제다
+- [ ] **worker 노드를 키울 것 (4C8G)** — 현재 2C4M으로는 막힌다. 검출 모델
+      RSS가 2.6GB이고 노드 allocatable이 3,810Mi라 여유가 없다. 게다가 이
+      프로젝트의 비교 축은 pod 개수(5.1)인데 2C4M에서는 **파드가 1개밖에
+      올라가지 않아 벤치마크 자체가 불가능하다**
+- [ ] 노드 증설 후 추론 중 `memory.peak`을 다시 재서 `limits.memory`를 조일 것
 - [ ] 한글 영수증 인식 결과가 로컬(8장)과 **동일한가**
 - [ ] `RUN_OCR_TESTS=1 pytest tests` 10개 통과
 
@@ -575,10 +581,24 @@ OCR_MAX_CONCURRENCY=1          OCR_MAX_CONCURRENCY=4
   찍힌 파드가 글자 있는 첫 요청에서 `OOMKilled`로 죽었다. 절반만 확인하는
   워밍업은 확인이 아니다. 지금은 사각형 몇 개를 그려 검출이 상자를 내놓게 한다.
 
-- **인식 단계가 메모리를 크게 쓴다.** 1200×1600 입력에서 `2560Mi`를 넘겼다.
-  검출은 `PP-OCRv5_server_det`(무거운 server판)이 자동 선택된다. 메모리가 계속
-  모자라면 `text_detection_model_name`으로 mobile판을 쓰거나
-  `OCR_MAX_IMAGE_SIDE`를 더 내리는 것이 다음 수단이다(6.3).
+- **검출 모델을 mobile로 바꾸면 안 된다 — 한글을 못 읽는다.** 메모리가 모자랄 때
+  가장 먼저 떠오르는 수단이지만, 맥에서 같은 영수증으로 재 보면 쓸 수 없다는 것이
+  분명하다.
+
+  | 검출 | `elapsed_ms` | RSS | 인식 결과 |
+  |---|---|---|---|
+  | server (기본값) | 6,200ms | 2,628MB | 한글 10줄 전부 정확 |
+  | `PP-OCRv5_mobile_det` | 1,400ms | 1,782MB | **숫자만.** 한글은 confidence 0.0, 빈 문자열 |
+
+  4.5배 빠르고 메모리도 800MB 적지만 한국어 workload로는 무용하다.
+
+  **더 고약한 것은 `count`가 10으로 똑같다는 점이다.** 검출은 상자 10개를 그대로
+  찾아내고 인식만 실패하므로, "10건 인식됨"만 확인하는 검증은 이 고장을
+  통과시킨다. 모델을 바꿀 일이 있으면 건수가 아니라 **텍스트 내용**을 비교할 것.
+
+- **입력 크기를 줄여도 메모리 문제는 안 풀린다.** `OCR_MAX_IMAGE_SIDE`를
+  1600 → 960으로 내려(픽셀 수 2.8배 감소) 다시 시험했으나 `limits.memory 3Gi`
+  에서 그대로 `OOMKilled`였다. 해상도가 아니라 검출 모델 자체의 크기 문제다.
 
 - **스레드 수를 두 군데서 맞춰야 한다.** `OMP_NUM_THREADS`(OpenMP)와 paddle 자체의
   `cpu_threads`는 별개다. 후자의 PaddleOCR 기본값이 **10**이라 컨테이너의 CPU
@@ -606,6 +626,20 @@ POST /ocr (영수증2)  7건 인식
 치즈케이크 · 6,500 · 합계 · 16,000 · 2026-09-13 14:22
 ```
 
+### 로컬 (2026-10-01, macOS arm64 48GB / paddlepaddle 3.3.1 / paddleocr 3.7.0)
+
+영수증 3024×4032(`OCR_MAX_IMAGE_SIDE=1600`으로 1200×1600 축소), 2회 측정.
+
+```
+검출 server  + oneDNN off   6,822 / 6,201 ms    한글 10줄 전부 정확
+검출 mobile  + oneDNN off   1,422 / 1,394 ms    숫자만, 한글 유실
+검출 server  + oneDNN ON    6,373 / 6,404 ms    한글 10줄 전부 정확
+```
+
+**oneDNN은 macOS arm64에서 차이가 없다**(6,201 vs 6,373 — 측정 오차 범위).
+클러스터(linux/amd64)에서 켜면 추론이 전부 죽는 것과 대비된다. 즉 7장의 oneDNN
+제약은 플랫폼에 따라 다르게 나타나며, 맥에서 재현되지 않는다.
+
 ### 클러스터
 
-아직 추론 검증이 끝나지 않았다. 6.1 참고.
+같은 요청이 `OOMKilled`로 죽는다. 노드가 2C4M이다. 6.1 참고.
