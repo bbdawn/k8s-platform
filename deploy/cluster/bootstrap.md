@@ -66,7 +66,8 @@ Calico의 기본 설정(`VXLANCrossSubnet`)은 **같은 서브넷 안에서는 �
 
 ### 0.3 노드 IP 적어 두기
 
-이후 모든 절에서 쓴다. OpenStack 콘솔이나 `ip -4 addr`로 확인한다.
+이후 모든 절에서 쓴다. 아래는 2026-11-25에 만든 VM 기준이고, 다시 만들면
+바뀌므로 `ip -4 addr`로 확인할 것.
 
 ```bash
 # [전체] 각 노드에서 자기 IP 확인
@@ -74,9 +75,9 @@ ip -4 addr show scope global | grep inet
 ```
 
 ```
-CP_IP=10.255.42.___
-W1_IP=10.255.42.___
-W2_IP=10.255.42.___
+CP_IP=10.255.42.65
+W1_IP=10.255.42.132
+W2_IP=10.255.42.101
 ```
 
 ---
@@ -94,13 +95,36 @@ hostname
 ```
 
 ```bash
-# [전체] 3대 모두 같은 내용. IP는 0.3절에서 적어 둔 값으로.
+# [전체] 3대 모두 같은 내용. 자기 자신을 포함해서 세 줄 다 넣는다.
 sudo tee -a /etc/hosts <<'EOF'
-10.255.42.___  k8s-cp
-10.255.42.___  k8s-worker1
-10.255.42.___  k8s-worker2
+10.255.42.65   k8s-cp
+10.255.42.132  k8s-worker1
+10.255.42.101  k8s-worker2
 EOF
 ```
+
+`/etc/hosts`는 그 머신 안에서만 쓰는 이름표라서, 한 대에 넣어도 다른 두 대는
+모른다. 그래서 3대 모두에 같은 내용을 넣는다.
+
+**클러스터가 도는 데 반드시 필요한 것은 아니다.** kubelet은 자기 IP를 노드에
+등록하고 API server도 그 IP로 접속하므로, 이름 해석 없이도 동작한다. 그래도 넣는
+이유는 세 가지다:
+
+- 노드가 **자기 호스트 이름**을 해석하지 못하면 kubeadm과 일부 도구가 경고를
+  내거나 실패한다. Ubuntu 클라우드 이미지가 `127.0.1.1 <hostname>`을 넣어 주긴
+  하지만, 그건 루프백이라 다른 노드가 쓸 수 없다.
+- `ssh k8s-worker1`, `scp ... k8s-cp:` 처럼 노드 사이를 오갈 때 IP를 외우지
+  않아도 된다. 이미지 tar를 옮기거나 로그를 가져올 때 계속 쓴다.
+- 오류 메시지에 IP 대신 이름이 나와서 읽기 쉽다.
+
+```bash
+# 확인 - 3대 모두에서 서로를 이름으로 찾을 수 있어야 한다
+getent hosts k8s-cp k8s-worker1 k8s-worker2
+```
+
+> cloud-init이 `/etc/hosts`를 관리하도록 설정돼 있으면 재부팅 때 덮어쓸 수 있다.
+> `grep manage_etc_hosts /etc/cloud/cloud.cfg` 가 `true`면 거기에 넣거나
+> `false`로 바꿀 것. Ubuntu 클라우드 이미지 기본값은 `false`라 보통은 문제없다.
 
 ### 1.2 swap 끄기
 
@@ -217,7 +241,7 @@ kubeadm version -o short               # 3대 모두 같은 버전
 ## 2. [cp] control plane 초기화
 
 ```bash
-CP_IP=10.255.42.___          # ← 0.3절 값
+CP_IP=10.255.42.65
 
 sudo kubeadm init \
   --apiserver-advertise-address=$CP_IP \
@@ -264,7 +288,7 @@ source ~/.bashrc
 **worker1, worker2 각각에서** 2절에서 복사한 명령을 그대로 실행한다.
 
 ```bash
-sudo kubeadm join 10.255.42.___:6443 \
+sudo kubeadm join 10.255.42.65:6443 \
   --token <토큰> \
   --discovery-token-ca-cert-hash sha256:<해시>
 ```
@@ -510,7 +534,7 @@ curl -s http://$CP_IP:30500/v2/_catalog     # {"repositories":[]}
 TLS 없이 평문 HTTP로 쓰므로, 노드마다 알려 줘야 한다. **3대 모두에서** 실행한다.
 
 ```bash
-CP_IP=10.255.42.___
+CP_IP=10.255.42.65
 
 # containerd 2.x 는 certs.d 디렉터리 방식을 쓴다
 sudo mkdir -p /etc/containerd/certs.d/$CP_IP:30500
@@ -592,7 +616,7 @@ cd k8s-platform
 ```
 
 ```bash
-CP_IP=10.255.42.___
+CP_IP=10.255.42.65
 IMAGE=$CP_IP:30500/ocr-workload:0.1.0-cpu
 
 sudo buildctl build \
