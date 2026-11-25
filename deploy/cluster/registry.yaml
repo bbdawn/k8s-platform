@@ -1,0 +1,97 @@
+# 클러스터 안에 두는 이미지 레지스트리.
+#
+# 왜 필요한가: 이 프로젝트의 비교 축은 파드 개수(1/2/4/8)다. 파드 8개를 띄우려면
+# worker 2대에 4개씩 퍼져야 하고, 그러려면 두 노드 모두에 같은 이미지가 있어야
+# 한다. 첫 클러스터에서는 레지스트리가 없어서 빌드한 노드 한 대에 파드를 고정했고,
+# 그래서 파드 개수를 늘릴 수가 없었다.
+#
+# TLS 를 쓰지 않는다. 사내 OpenStack 안에서만 접근하는 실습용이고, 인증서를
+# 붙이면 노드마다 CA 를 깔아야 해서 배우려는 것과 상관없는 일이 늘어난다.
+# 대신 노드의 containerd 에 "이 주소는 평문 HTTP 로 쓴다"고 등록해야 한다
+# (bootstrap.md 7.2절의 certs.d 설정). 운영 환경이라면 TLS 를 붙일 것.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: registry
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: registry
+  template:
+    metadata:
+      labels:
+        app: registry
+    spec:
+      # control plane 에 고정한다. 저장소로 hostPath 를 쓰기 때문에 파드가 다른
+      # 노드로 옮겨 가면 올려 둔 이미지가 통째로 사라진다. cp 는 워크로드를
+      # 올리지 않는 노드라 측정에 영향을 주지 않는다는 점도 맞다.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      # cp 에는 kubeadm 이 기본으로 NoSchedule taint 를 걸어 둔다. 그걸 견디겠다고
+      # 선언해야 이 파드가 cp 에 올라갈 수 있다. taint 를 지우는 대신 이 파드만
+      # 예외로 두는 것이 옳다 - taint 를 지우면 다른 모든 파드도 cp 로 샌다.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: registry
+          image: registry:2
+          ports:
+            - name: http
+              containerPort: 5000
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/registry
+          # OCR 이미지는 모델을 구워서 2GB 가 넘는다. push/pull 할 때 레지스트리가
+          # 메모리를 꽤 쓰므로 1Gi 를 준다.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v2/
+              port: http
+            periodSeconds: 20
+      volumes:
+        # PVC 가 아니라 hostPath 다. 이 클러스터에는 StorageClass 가 없어서
+        # PVC 를 쓰면 Pending 에서 멈춘다. 실습용으로는 cp 의 디스크(80GB)면
+        # 충분하다. 노드를 다시 만들면 이미지도 사라지므로 다시 push 하면 된다.
+        - name: data
+          hostPath:
+            path: /var/lib/registry
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: registry
+spec:
+  # NodePort 라서 <어느 노드 IP 든>:30500 으로 닿는다. worker 에서 이미지를
+  # 빌드해 push 할 때도, kubelet 이 pull 할 때도 같은 주소를 쓴다.
+  type: NodePort
+  selector:
+    app: registry
+  ports:
+    - name: http
+      port: 5000
+      targetPort: http
+      nodePort: 30500
