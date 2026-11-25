@@ -6,16 +6,22 @@ metadata:
     app: ocr
 spec:
   replicas: 1
-  # 기본값 RollingUpdate가 아니라 Recreate다. RollingUpdate는 예전 파드를 내리기
-  # 전에 새 파드를 띄우는데, nodeSelector가 둘 다 같은 노드에 묶어 두므로 새
-  # 파드가 그 노드에 두 번째 몫을 요구하게 된다. 노드에 그만한 여유가 없으면 새
-  # 파드는 Pending, 예전 파드는 새 파드가 Ready 되기를 기다려 rollout이 교착된다.
-  # 2코어 worker에서 첫 재배포에 실제로 걸렸다:
+  # maxSurge: 0 이 핵심이다. 기본값 RollingUpdate 는 예전 파드를 내리기 전에 새
+  # 파드를 띄우는데, 그러면 측정 대상 노드가 잠시 workload 두 벌을 동시에 돌리게
+  # 되어 CPU 를 나눠 쓴다. 벤치마크에서는 그 순간의 수치가 통째로 오염된다.
+  #
+  # 첫 클러스터(2코어 worker)에서는 그 두 번째 몫을 노드가 감당하지 못해 rollout
+  # 이 교착되기까지 했다:
   #   0/3 nodes are available: 1 Insufficient cpu, 1 Insufficient memory, ...
-  # 여기서 무중단은 아무 가치가 없고, 측정 대상 노드에서 workload 두 벌이 잠시
-  # 라도 CPU를 나눠 쓰는 것은 오히려 해롭다.
+  # 그래서 그때는 Recreate 를 썼다. 지금은 8코어 2대라 여유가 있지만, 그래도
+  # surge 를 0 으로 두는 편이 맞다 - 자원 때문이 아니라 측정 때문이다.
+  # 파드를 먼저 내리고 새로 띄우므로 교체 중 잠깐 끊기는데, 여기서 무중단은
+  # 아무 가치가 없다.
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: ocr
@@ -24,10 +30,13 @@ spec:
       labels:
         app: ocr
     spec:
-      # 이미지를 빌드한 노드에 파드를 고정한다. 레지스트리가 없어서 이미지가
-      # 정확히 한 노드에만 있고, 다른 노드에 뜨면 ErrImageNeverPull이 난다.
-      # 측정을 위해서도 필요하다. 고정하지 않으면 replica가 worker들에 흩어져
-      # 서로 다른 머신의 수치가 섞인다.
+      # 측정 대상 노드에만 파드를 올린다. 고정하지 않으면 파드가 cp 쪽으로 샐
+      # 수 있고(지금은 taint 가 막지만 taint 를 풀면 샌다), 측정 대상이 아닌
+      # 머신의 수치가 섞인다.
+      #
+      # 첫 클러스터에서는 "이미지가 그 노드에만 있어서" 고정이 필수였다. 이제는
+      # 레지스트리가 있어서 어느 노드든 받아올 수 있으므로, 고정의 이유가
+      # 이미지 배포가 아니라 측정 범위로 바뀌었다.
       #
       # kubernetes.io/hostname이 아니라 역할 label을 쓴다. 매니페스트에 머신
       # 이름이 들어가면 파일이 그 머신에 묶여서, workload를 옮길 때마다 파일을
@@ -44,6 +53,22 @@ spec:
       # 죽는 것보다 낫다. label을 받은 노드에는 이미지가 있어야 한다.
       nodeSelector:
         ocr-bench/role: target
+      # replica 를 worker 2대에 고르게 나눈다. 없으면 scheduler 가 한쪽에
+      # 몰아넣을 수 있고, 그러면 "파드 4개"라고 적어 놓고 실제로는 한 머신에서
+      # 4개가 CPU 를 나눠 쓴 수치를 재게 된다. 파드 개수를 축으로 삼는 이
+      # 벤치마크에서는 배치가 곧 측정 조건이다.
+      #
+      # maxSkew: 1 - 두 노드의 파드 수 차이가 1을 넘지 못한다. 그래서
+      # 1 -> (1,0), 2 -> (1,1), 4 -> (2,2), 8 -> (4,4) 로 떨어진다.
+      # DoNotSchedule - 못 지키면 스케줄하지 않는다. 조용히 한쪽에 몰리느니
+      # Pending 으로 남아 눈에 띄는 쪽이 낫다.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: ocr
       # Dockerfile의 APP_UID build arg와 같아야 한다. 이미지는 그 사용자의 HOME
       # 아래에 OCR 모델을 굽고 소유권도 그 사용자에게 넘긴다.
       securityContext:
@@ -59,33 +84,28 @@ spec:
           envFrom:
             - configMapRef:
                 name: ocr-config
-          # 감이 아니라 실측값이다. 컨테이너 cgroup의 memory.peak이 1282Mi였고
-          # 노드 allocatable은 3810Mi다.
-          #
-          # requests와 limits를 양쪽 다 같게 맞추면 파드가 Guaranteed QoS 등급이
+          # requests 와 limits 를 양쪽 다 같게 맞추면 파드가 Guaranteed QoS 등급이
           # 되어, 노드가 쪼들릴 때 가장 나중에 밀려난다. 벤치마크는 어차피 자원이
           # 고정돼야 수치가 흔들리지 않는다.
           #
-          # cpu가 2가 아니라 1500m인 이유: 이 노드의 allocatable이 정확히 2코어인데
-          # kube-reserved가 설정돼 있지 않다. 2코어를 다 쓸 수 있는 파드는 kubelet,
-          # containerd, Calico를 굶길 수 있다. 가정이 아니라 실제로 일어났다.
-          # 아래 probe들이 포화된 컨테이너를 상대로 타임아웃 나고 kubelet이 죽였다:
-          #   Liveness probe failed: ... context deadline exceeded
-          #   Killing: Container ocr failed liveness probe, will be restarted
-          # 시스템 몫으로 500m를 남기는 것이 이를 막는다.
+          # 숫자는 "파드 8개"라는 목표에서 나온다. worker 2대(각 8 vCPU / 16GB)에
+          # kube-reserved 500m+512Mi, system-reserved 500m+1Gi, eviction 500Mi 를
+          # 떼면 allocatable 이 노드당 약 7 vCPU / 14Gi 다. 여기에 calico-node 와
+          # kube-proxy 몫을 빼고 4개씩 나누면:
           #
-          # memory는 3Gi. 2560Mi로는 모자랐다. 1200x1600 이미지의 인식 단계가
-          # 그 한도를 넘겨 요청 처리 도중 OOMKilled로 죽었다.
+          #   cpu    6,000m / 4 = 1,500m   (노드당 1코어 남음)
+          #   memory    12Gi / 4 = 3Gi     (노드당 2Gi 남음)
           #
-          # allocatable(이 노드에서 3810Mi)보다 작게 두는 것이 핵심이다. 원래
-          # 값이던 4Gi는 노드가 줄 수 있는 것보다 **컸다.** 그래서 컨테이너가
-          # 자기 한도에 닿기 전에 노드가 먼저 말랐고, 그 죽음이 probe 실패를
-          # 동반한 SIGTERM/Error로 나타났다 - probe 문제처럼 읽히지만 아니다.
-          # 한도를 allocatable 아래로 두면 같은 초과가 이 컨테이너의 깔끔한
-          # OOMKilled로 나온다. 낮게 틀리면 원인이 읽히고, 높게 틀리면 안 읽힌다.
+          # memory 3Gi 가 입력 해상도를 결정한다. server 검출의 피크 메모리가
+          # 입력 픽셀 수에 비례하기 때문이다. configmap 의 OCR_MAX_IMAGE_SIDE
+          # 주석에 역산식이 있다.
           #
-          # calico, kube-proxy, eviction threshold 몫으로 약 740Mi가 남는다.
-          # 4GB 노드에서 이 위로는 여유가 많지 않다.
+          # limits 를 노드 allocatable 보다 작게 두는 것이 중요하다. 첫 클러스터
+          # 에서 4Gi(allocatable 3,810Mi)로 뒀더니, 컨테이너가 자기 한도에 닿기
+          # 전에 노드가 먼저 말랐다. 그 죽음은 probe 실패를 동반한 SIGTERM/Error
+          # 로 나타나서 probe 문제처럼 읽혔다. 한도를 allocatable 아래로 두면
+          # 같은 초과가 이 컨테이너의 깔끔한 OOMKilled 로 나온다.
+          # 낮게 틀리면 원인이 읽히고, 높게 틀리면 안 읽힌다.
           resources:
             requests:
               cpu: "1500m"
