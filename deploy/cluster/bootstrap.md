@@ -75,9 +75,9 @@ ip -4 addr show scope global | grep inet
 ```
 
 ```
-CP_IP=10.255.42.65
-W1_IP=10.255.42.132
-W2_IP=10.255.42.101
+CP_IP=10.255.42.124
+W1_IP=10.255.42.60
+W2_IP=10.255.42.77
 ```
 
 ---
@@ -97,9 +97,9 @@ hostname
 ```bash
 # [전체] 3대 모두 같은 내용. 자기 자신을 포함해서 세 줄 다 넣는다.
 sudo tee -a /etc/hosts <<'EOF'
-10.255.42.65   k8s-cp
-10.255.42.132  k8s-worker1
-10.255.42.101  k8s-worker2
+10.255.42.124  k8s-cp
+10.255.42.60   k8s-worker1
+10.255.42.77   k8s-worker2
 EOF
 ```
 
@@ -241,7 +241,7 @@ kubeadm version -o short               # 3대 모두 같은 버전
 ## 2. [cp] control plane 초기화
 
 ```bash
-CP_IP=10.255.42.65
+CP_IP=10.255.42.124
 
 sudo kubeadm init \
   --apiserver-advertise-address=$CP_IP \
@@ -288,7 +288,7 @@ source ~/.bashrc
 **worker1, worker2 각각에서** 2절에서 복사한 명령을 그대로 실행한다.
 
 ```bash
-sudo kubeadm join 10.255.42.65:6443 \
+sudo kubeadm join 10.255.42.124:6443 \
   --token <토큰> \
   --discovery-token-ca-cert-hash sha256:<해시>
 ```
@@ -534,7 +534,7 @@ curl -s http://$CP_IP:30500/v2/_catalog     # {"repositories":[]}
 TLS 없이 평문 HTTP로 쓰므로, 노드마다 알려 줘야 한다. **3대 모두에서** 실행한다.
 
 ```bash
-CP_IP=10.255.42.65
+CP_IP=10.255.42.124
 
 # containerd 2.x 는 certs.d 디렉터리 방식을 쓴다
 sudo mkdir -p /etc/containerd/certs.d/$CP_IP:30500
@@ -616,7 +616,7 @@ cd k8s-platform
 ```
 
 ```bash
-CP_IP=10.255.42.65
+CP_IP=10.255.42.124
 IMAGE=$CP_IP:30500/ocr-workload:0.1.0-cpu
 
 sudo buildctl build \
