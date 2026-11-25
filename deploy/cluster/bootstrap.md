@@ -165,7 +165,16 @@ sysctl net.bridge.bridge-nf-call-iptables net.ipv4.ip_forward
 
 ### 1.4 containerd 설치
 
-Ubuntu 24.04 기본 저장소의 containerd는 1.7.x다. Docker 저장소에서 2.x를 받는다.
+**먼저 이미 깔려 있는지 본다.** 사내 OpenStack 이미지에는 containerd 2.2.1이
+구워져 있었다. 그러면 이 절은 통째로 건너뛰고 1.5로 간다.
+
+```bash
+containerd --version
+```
+
+없을 때만 설치한다. Ubuntu 24.04 기본 저장소의 containerd는 1.7.x이므로, 2.x가
+필요하면 Docker 저장소에서 받는다. (k8s 자체는 1.7.x로도 잘 돈다 — 1.5절의
+cgroup driver와 7.2절의 설정 키 이름만 버전에 맞추면 된다.)
 
 ```bash
 sudo apt-get update
