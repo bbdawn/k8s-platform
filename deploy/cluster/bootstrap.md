@@ -60,9 +60,15 @@ Calico가 캡슐화 없이 파드 패킷을 그대로 내보내면 **네트워�
 2. VM 포트마다 `allowed_address_pairs`에 파드 CIDR을 등록하거나 포트 보안을 끈다.
    OpenStack 관리자 권한이 필요하다.
 
-Calico의 기본 설정(`VXLANCrossSubnet`)은 **같은 서브넷 안에서는 캡슐화를 하지
-않는다.** 노드 3대가 같은 서브넷에 있으면 정확히 위 함정에 빠진다. 그래서
-아래에서 `encapsulation: VXLAN`으로 **항상** 캡슐화하게 바꾼다.
+**설치 방식에 따라 기본값이 다르니 확인할 것:**
+
+| 설치 방식 | 캡슐화 기본값 | anti-spoofing |
+|---|---|---|
+| `manifests/calico.yaml` | `CALICO_IPV4POOL_IPIP="Always"` | **안 걸린다** (항상 IPIP 캡슐화) |
+| tigera-operator + `custom-resources.yaml` | `encapsulation: VXLANCrossSubnet` | **걸린다** (같은 서브넷에서 캡슐화 생략) |
+
+아래 4절은 `calico.yaml`을 쓴다. 첫 번째 클러스터에서 이 OpenStack 환경에
+실제로 동작한 방식이고, 기본값이 이미 항상 캡슐화라 따로 손댈 것이 없다.
 
 ### 0.3 노드 IP 적어 두기
 
@@ -313,66 +319,45 @@ kubectl get nodes
 
 ## 4. [cp] Calico 설치
 
-```bash
-# 최신 릴리스 태그를 직접 알아낸다. 버전을 손으로 박지 않는다.
-CALICO=$(curl -s https://api.github.com/repos/projectcalico/calico/releases/latest \
-         | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-echo "Calico $CALICO"
-```
+`manifests/calico.yaml` 한 장으로 설치한다. operator 방식보다 단순하고, **첫 번째
+클러스터에서 이 환경에 실제로 동작한 방식이다.**
 
-### 4.1 operator 설치
+### 4.1 버전 고르기
 
-```bash
-kubectl create -f https://raw.githubusercontent.com/projectcalico/calico/$CALICO/manifests/tigera-operator.yaml
-```
-
-> CRD가 커서 `metadata.annotations: Too long` 오류가 나면 서버 사이드로 적용한다:
-> `kubectl apply --server-side -f <같은 URL>`
+Calico와 Kubernetes는 짝이 있다 — v3.32가 k8s v1.36에 맞춰 나왔다.
+[릴리스 목록](https://github.com/projectcalico/calico/releases)에서 설치한 k8s
+마이너 버전에 맞는 태그를 고른다.
 
 ```bash
-kubectl -n tigera-operator rollout status deploy/tigera-operator --timeout=180s
+CALICO=v3.32.0          # ← k8s v1.36 기준. 릴리스 목록에서 최신 패치로.
 ```
 
-### 4.2 Installation 리소스 — VXLAN always
-
-**기본 `custom-resources.yaml`을 그대로 쓰지 말 것.** 기본값은
-`VXLANCrossSubnet`이라 같은 서브넷 안에서는 캡슐화를 안 하고, 그러면 0.2절의
-OpenStack anti-spoofing에 걸린다.
+### 4.2 설치
 
 ```bash
-kubectl create -f - <<'EOF'
-apiVersion: operator.tigera.io/v1
-kind: Installation
-metadata:
-  name: default
-spec:
-  calicoNetwork:
-    ipPools:
-      - name: default-ipv4-ippool
-        blockSize: 26
-        cidr: 192.168.0.0/16
-        # OpenStack Neutron 은 VM 포트에 등록되지 않은 출발지 IP 를 버린다.
-        # 파드 IP 는 VM 의 IP 가 아니므로, 캡슐화를 하지 않으면 파드 간 통신이
-        # 조용히 끊긴다. CrossSubnet(기본값)은 같은 서브넷에서 캡슐화를 생략하는데
-        # 노드 3대가 같은 서브넷에 있으므로 정확히 그 경우에 해당한다.
-        # 항상 캡슐화하면 바깥에서 보이는 출발지는 노드 IP 라 걸리지 않는다.
-        encapsulation: VXLAN
-        natOutgoing: Enabled
-        nodeSelector: all()
----
-apiVersion: operator.tigera.io/v1
-kind: APIServer
-metadata:
-  name: default
-spec: {}
-EOF
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/$CALICO/manifests/calico.yaml
 ```
+
+**CIDR이 `kubeadm init`과 맞는지 확인할 것.** `calico.yaml`의
+`CALICO_IPV4POOL_CIDR`은 주석 처리돼 있어서 Calico 기본값 `192.168.0.0/16`을
+쓴다. 2절에서 `--pod-network-cidr=192.168.0.0/16`을 줬으므로 일치한다. 한쪽만
+바꾸면 파드가 라우팅되지 않는다.
+
+```bash
+# 실제로 어떤 캡슐화를 쓰는지 확인 - IPIP=Always 여야 한다
+kubectl -n kube-system get ds calico-node \
+  -o jsonpath='{range .spec.template.spec.containers[0].env[?(@.name=="CALICO_IPV4POOL_IPIP")]}{.name}={.value}{"\n"}{end}'
+```
+
+> **operator 방식을 쓸 거라면** `custom-resources.yaml`을 그대로 적용하지 말 것.
+> 그쪽 기본값은 `VXLANCrossSubnet`이라 같은 서브넷에서 캡슐화를 생략하고, 0.2절의
+> anti-spoofing에 걸린다. `encapsulation: VXLAN`(always)으로 바꿔야 한다.
 
 ### 4.3 확인
 
 ```bash
 # calico-node 3개(노드당 1개)가 Running 이 될 때까지 몇 분 걸린다
-kubectl -n calico-system get pods -w
+kubectl -n kube-system get pods -l k8s-app=calico-node -w
 ```
 
 ```bash
@@ -382,7 +367,7 @@ kubectl get nodes
 
 **여기서 파드 네트워크가 실제로 되는지 반드시 확인한다.** 노드가 Ready인 것과
 파드끼리 통신이 되는 것은 별개다 — 0.2절의 함정은 노드를 Ready로 두고 통신만
-끊는다.
+끊으므로, `get nodes`만 보고 넘어가면 한참 뒤에 엉뚱한 데를 파게 된다.
 
 ```bash
 # 서로 다른 노드에 파드 2개를 띄우고 핑을 쏜다
@@ -533,10 +518,16 @@ curl -s http://$CP_IP:30500/v2/_catalog     # {"repositories":[]}
 
 TLS 없이 평문 HTTP로 쓰므로, 노드마다 알려 줘야 한다. **3대 모두에서** 실행한다.
 
+**설정 키 이름이 containerd 버전마다 다르다.** 먼저 확인할 것:
+
+```bash
+containerd --version
+```
+
 ```bash
 CP_IP=10.255.42.124
 
-# containerd 2.x 는 certs.d 디렉터리 방식을 쓴다
+# hosts.toml 은 버전과 무관하게 같다
 sudo mkdir -p /etc/containerd/certs.d/$CP_IP:30500
 sudo tee /etc/containerd/certs.d/$CP_IP:30500/hosts.toml >/dev/null <<EOF
 server = "http://$CP_IP:30500"
@@ -545,15 +536,33 @@ server = "http://$CP_IP:30500"
   capabilities = ["pull", "resolve", "push"]
   skip_verify = true
 EOF
+```
 
-# config.toml 에 certs.d 를 보라고 알려 준다 (기본값이 아니다)
+`config.toml` 에 certs.d 를 보라고 알려 준다. 기본값이 아니라서 반드시 넣어야
+하는데, **플러그인 이름이 1.7 과 2.x 에서 다르다.** 틀린 이름으로 넣으면 조용히
+무시되고 `ImagePullBackOff` 가 난다.
+
+```bash
+# containerd 1.7.x
+grep -q 'config_path' /etc/containerd/config.toml || \
+sudo tee -a /etc/containerd/config.toml >/dev/null <<'EOF'
+
+[plugins."io.containerd.grpc.v1.cri".registry]
+  config_path = "/etc/containerd/certs.d"
+EOF
+```
+
+```bash
+# containerd 2.x
 grep -q 'config_path' /etc/containerd/config.toml || \
 sudo tee -a /etc/containerd/config.toml >/dev/null <<'EOF'
 
 [plugins.'io.containerd.cri.v1.images'.registry]
   config_path = '/etc/containerd/certs.d'
 EOF
+```
 
+```bash
 sudo systemctl restart containerd
 ```
 
