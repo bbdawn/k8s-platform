@@ -50,6 +50,8 @@
   }
   .out button { flex: 0 0 auto; padding: 4px 10px; font-size: 12px; }
   .inline { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .dir { color: var(--muted); font-size: 12px; padding-bottom: 7px; }
+  .dir.set { color: var(--text); font-weight: 600; }
   .inline .field { flex: 1 1 130px; }
   #summary { margin-top: 16px; color: var(--muted); }
   #summary b { color: var(--text); font-variant-numeric: tabular-nums; }
@@ -83,6 +85,9 @@
   <div class="controls">
     <button id="copyAll" class="ghost" disabled>전체 복사</button>
     <button id="downloadAll" class="ghost" disabled>전체 다운로드</button>
+    <button id="pickDir" class="ghost" type="button" hidden>저장 폴더 선택</button>
+    <button id="clearDir" class="ghost" type="button" hidden>해제</button>
+    <span id="dirName" class="dir">브라우저 기본 다운로드 폴더</span>
   </div>
 
   <div id="summary"></div>
@@ -125,9 +130,10 @@ downloadAllBtn.addEventListener("click", async () => {
   const label = downloadAllBtn.textContent;
   downloadAllBtn.disabled = true;
   for (const item of items) {
-    downloadFile(item.file, downloadName(item.file, item.code.textContent));
-    // 브라우저가 연속 다운로드를 막지 않도록 약간 간격을 둔다.
-    await new Promise(resolve => setTimeout(resolve, 300));
+    await saveFile(item.file, downloadName(item.file, item.code.textContent));
+    // 폴더에 직접 쓸 때는 필요 없다. <a download>를 연달아 누르면 브라우저가
+    // 중간부터 막아 버려서, 그 경로에서만 간격을 둔다.
+    if (!dirHandle) await new Promise(resolve => setTimeout(resolve, 300));
   }
   downloadAllBtn.textContent = `${items.length}건 저장됨`;
   setTimeout(() => { downloadAllBtn.textContent = label; downloadAllBtn.disabled = false; }, 1500);
@@ -378,11 +384,12 @@ function renderCard(slot, file, payload, roundTripMs) {
   copyBtn.addEventListener("click", () => copyText(code.textContent, copyBtn, "복사됨"));
 
   const downloadBtn = slot.querySelector(".b-download");
-  downloadBtn.addEventListener("click", () => {
-    downloadFile(file, downloadName(file, code.textContent));
+  downloadBtn.addEventListener("click", async () => {
     const label = downloadBtn.textContent;
+    downloadBtn.disabled = true;
+    await saveFile(file, downloadName(file, code.textContent));
     downloadBtn.textContent = "저장됨";
-    setTimeout(() => { downloadBtn.textContent = label; }, 1200);
+    setTimeout(() => { downloadBtn.textContent = label; downloadBtn.disabled = false; }, 1200);
   });
 }
 
@@ -402,7 +409,7 @@ function renderTable(payload, roundTripMs) {
          `<tbody>${rows}</tbody></table>${stats}`;
 }
 
-// --- 다운로드 ---------------------------------------------------------------
+// --- 저장 -------------------------------------------------------------------
 
 // 파일명에 쓸 수 없는 문자. 상호에 섞여 들어와도 저장이 실패하지 않게 걷어낸다.
 const ILLEGAL_IN_FILENAME = /[\\/:*?"<>|\u0000-\u001f]/g;
@@ -415,7 +422,43 @@ function downloadName(file, base) {
 }
 
 /** 업로드한 원본 파일을 그대로, 이름만 바꿔서 저장한다. */
-function downloadFile(file, name) {
+async function saveFile(file, name) {
+  if (dirHandle) {
+    try {
+      if (await ensureDirPermission(dirHandle)) {
+        const target = await freeName(dirHandle, name);
+        const handle = await dirHandle.getFileHandle(target, { create: true });
+        const writable = await handle.createWritable();
+        await writable.write(file);
+        await writable.close();
+        return;
+      }
+    } catch (err) {
+      // 폴더가 지워졌거나 권한이 막힌 경우. 저장 자체를 포기하지는 않는다.
+      console.warn("폴더에 저장하지 못해 기본 다운로드로 대체합니다", err);
+    }
+  }
+  downloadToBrowser(file, name);
+}
+
+/** 같은 이름이 이미 있으면 ' (2)', ' (3)'을 붙인다. 조용히 덮어쓰지 않도록. */
+async function freeName(dir, name) {
+  const ext = (name.match(/\.[^./\\]+$/) || [""])[0];
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  let candidate = name;
+  for (let n = 2; n <= 99; n++) {
+    try {
+      await dir.getFileHandle(candidate);  // 찾아지면 이미 있는 이름이다
+    } catch {
+      return candidate;                    // NotFoundError - 비어 있다
+    }
+    candidate = `${stem} (${n})${ext}`;
+  }
+  return candidate;
+}
+
+/** 폴더를 고르지 않았을 때. 브라우저 기본 다운로드 폴더로 간다. */
+function downloadToBrowser(file, name) {
   const url = URL.createObjectURL(file);
   const link = document.createElement("a");
   link.href = url;
@@ -424,6 +467,103 @@ function downloadFile(file, name) {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// --- 저장 폴더 --------------------------------------------------------------
+
+// 폴더를 직접 고르는 것은 File System Access API로만 된다. Chrome/Edge 계열에만
+// 있고 Safari·Firefox에는 없으며, localhost나 https에서만 동작한다(이 앱은 둘 중
+// 하나로 열리므로 상관없다). 고르지 않았거나 지원하지 않는 브라우저에서는 예전처럼
+// <a download>로 떨어뜨리고, 그때는 브라우저 기본 다운로드 폴더로 간다.
+const CAN_PICK_DIR = typeof window.showDirectoryPicker === "function";
+
+const pickDirBtn = document.getElementById("pickDir");
+const clearDirBtn = document.getElementById("clearDir");
+const dirNameLabel = document.getElementById("dirName");
+
+let dirHandle = null;
+
+// 고른 폴더는 IndexedDB에 담아 둔다. FileSystemDirectoryHandle은 문자열로 바꿀 수
+// 없어서 localStorage에는 넣지 못한다. 새로고침해도 다시 고르지 않아도 된다.
+const HANDLE_DB = "ocr-workload";
+const HANDLE_STORE = "handles";
+const HANDLE_KEY = "download-dir";
+
+function openHandleDb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(HANDLE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(HANDLE_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function rememberDir(handle) {
+  const db = await openHandleDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, "readwrite");
+    const store = tx.objectStore(HANDLE_STORE);
+    if (handle) store.put(handle, HANDLE_KEY);
+    else store.delete(HANDLE_KEY);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function recallDir() {
+  const db = await openHandleDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(HANDLE_STORE, "readonly");
+    const req = tx.objectStore(HANDLE_STORE).get(HANDLE_KEY);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * 쓰기 권한을 확인한다.
+ * 권한은 탭을 닫으면 사라지므로, 복구해 온 폴더는 저장 직전에 다시 물어야 한다.
+ * requestPermission은 사용자 제스처 안에서만 통하는데, 저장은 언제나 버튼 클릭에서
+ * 시작되므로 조건이 충족된다.
+ */
+async function ensureDirPermission(handle) {
+  const opts = { mode: "readwrite" };
+  if ((await handle.queryPermission(opts)) === "granted") return true;
+  return (await handle.requestPermission(opts)) === "granted";
+}
+
+function showDir() {
+  const chosen = Boolean(dirHandle);
+  dirNameLabel.textContent = chosen ? `${dirHandle.name} 폴더에 저장` : "브라우저 기본 다운로드 폴더";
+  dirNameLabel.classList.toggle("set", chosen);
+  clearDirBtn.hidden = !chosen;
+  pickDirBtn.textContent = chosen ? "폴더 바꾸기" : "저장 폴더 선택";
+}
+
+if (CAN_PICK_DIR) {
+  pickDirBtn.hidden = false;
+  pickDirBtn.addEventListener("click", async () => {
+    try {
+      // id를 주면 다음에 열 때 같은 위치에서 시작한다.
+      dirHandle = await window.showDirectoryPicker({ id: "ocr-out", mode: "readwrite" });
+    } catch {
+      return;  // 사용자가 취소했다
+    }
+    rememberDir(dirHandle).catch(() => {});
+    showDir();
+  });
+  clearDirBtn.addEventListener("click", () => {
+    dirHandle = null;
+    rememberDir(null).catch(() => {});
+    showDir();
+  });
+  recallDir().then(handle => {
+    if (!handle) return;
+    dirHandle = handle;
+    showDir();
+  }).catch(() => {});
+} else {
+  dirNameLabel.textContent = "브라우저 기본 다운로드 폴더 (폴더 지정은 Chrome/Edge에서만 됩니다)";
 }
 
 // --- 복사 -------------------------------------------------------------------
