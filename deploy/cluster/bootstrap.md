@@ -1,21 +1,28 @@
 # 클러스터 구축 절차
 
-OpenStack VM 3대에 kubeadm으로 클러스터를 세우는 순서. 2026-11-25에 두 번째로
-만들면서 정리했다. 첫 번째 클러스터에서 실제로 걸렸던 것들을 주석으로 남겨 뒀다.
+OpenStack VM 4대(일반 3 + GPU 1)에 kubeadm으로 클러스터를 세우는 순서.
+2026-11-26에 **다른 OpenStack 환경에서 세 번째로** 만들면서 정리했다. 앞선 두
+클러스터에서 실제로 걸렸던 것들을 주석으로 남겨 뒀다.
 
-| VM | vCPU | Memory | Disk | 역할 |
-|---|---|---|---|---|
-| `k8s-cp` | 4 | 8GB | 80GB | control plane + 레지스트리 |
-| `k8s-worker1` | 8 | 16GB | 100GB | 측정 대상 |
-| `k8s-worker2` | 8 | 16GB | 100GB | 측정 대상 |
+| VM | Node | IP | 역할 |
+|---|---|---|---|
+| vm-1 | `k8s-cp` | `10.240.0.18` | control plane + 레지스트리 + 모니터링 |
+| vm-2 | `k8s-worker1` | `10.240.0.47` | CPU 측정 대상 |
+| vm-3 | `k8s-worker2` | `10.240.0.132` | CPU 측정 대상 |
+| gpu | `k8s-gpu` | `10.240.0.25` | **GPU 측정 대상 (H100)** |
+
+GPU 노드는 이 문서의 1절(공통 준비)과 3절(join)만 따르고, 드라이버와
+device plugin은 **`gpu-node.md`** 를 따른다. 순서가 중요하다 - 드라이버 설치에
+재부팅이 필요하므로 **join 전에** 끝내야 한다.
 
 - Ubuntu 24.04 LTS / amd64
 - Kubernetes **v1.36** — 지난번 v1.34는 2026-10에 지원이 끝났다. Calico v3.32가
   v1.36에 맞춰 나와서 짝이 분명하다.
-- CNI: Calico, **VXLAN(always)** — OpenStack에서는 이게 중요하다. 아래 0절 참고.
+- CNI: Calico, `manifests/calico.yaml` — 기본값이 **IPIP Always** 라 파드 패킷이
+  항상 캡슐화된다. OpenStack에서는 이게 중요하다. 아래 0.2절 참고.
 - 컨테이너 런타임: containerd 2.x (Docker apt 저장소의 `containerd.io`)
 
-각 절의 머리에 **어느 노드에서 실행하는지** 적어 뒀다. `[전체]`는 3대 모두.
+각 절의 머리에 **어느 노드에서 실행하는지** 적어 뒀다. `[전체]`는 4대 모두.
 
 ---
 
@@ -81,16 +88,20 @@ ip -4 addr show scope global | grep inet
 ```
 
 ```
-CP_IP=10.255.42.124
-W1_IP=10.255.42.60
-W2_IP=10.255.42.77
+CP_IP=10.240.0.18
+W1_IP=10.240.0.47
+W2_IP=10.240.0.132
+GPU_IP=10.240.0.25
 ```
+
+노드 서브넷은 `10.240.0.0/24` 다. 2절에서 주는 파드 CIDR `192.168.0.0/16` 과
+겹치지 않는다 - 겹치면 라우팅이 조용히 깨진다.
 
 ---
 
 ## 1. [전체] 공통 사전 작업
 
-3대 모두에서 똑같이 실행한다.
+4대 모두에서 똑같이 실행한다.
 
 ### 1.1 호스트 이름과 /etc/hosts
 
@@ -101,16 +112,17 @@ hostname
 ```
 
 ```bash
-# [전체] 3대 모두 같은 내용. 자기 자신을 포함해서 세 줄 다 넣는다.
+# [전체] 4대 모두 같은 내용. 자기 자신을 포함해서 네 줄 다 넣는다.
 sudo tee -a /etc/hosts <<'EOF'
-10.255.42.124  k8s-cp
-10.255.42.60   k8s-worker1
-10.255.42.77   k8s-worker2
+10.240.0.18   k8s-cp
+10.240.0.47   k8s-worker1
+10.240.0.132  k8s-worker2
+10.240.0.25   k8s-gpu
 EOF
 ```
 
-`/etc/hosts`는 그 머신 안에서만 쓰는 이름표라서, 한 대에 넣어도 다른 두 대는
-모른다. 그래서 3대 모두에 같은 내용을 넣는다.
+`/etc/hosts`는 그 머신 안에서만 쓰는 이름표라서, 한 대에 넣어도 다른 세 대는
+모른다. 그래서 4대 모두에 같은 내용을 넣는다.
 
 **클러스터가 도는 데 반드시 필요한 것은 아니다.** kubelet은 자기 IP를 노드에
 등록하고 API server도 그 IP로 접속하므로, 이름 해석 없이도 동작한다. 그래도 넣는
@@ -124,8 +136,8 @@ EOF
 - 오류 메시지에 IP 대신 이름이 나와서 읽기 쉽다.
 
 ```bash
-# 확인 - 3대 모두에서 서로를 이름으로 찾을 수 있어야 한다
-getent hosts k8s-cp k8s-worker1 k8s-worker2
+# 확인 - 4대 모두에서 서로를 이름으로 찾을 수 있어야 한다
+getent hosts k8s-cp k8s-worker1 k8s-worker2 k8s-gpu
 ```
 
 > cloud-init이 `/etc/hosts`를 관리하도록 설정돼 있으면 재부팅 때 덮어쓸 수 있다.
@@ -256,7 +268,7 @@ kubeadm version -o short               # 3대 모두 같은 버전
 ## 2. [cp] control plane 초기화
 
 ```bash
-CP_IP=10.255.42.124
+CP_IP=10.240.0.18
 
 sudo kubeadm init \
   --apiserver-advertise-address=$CP_IP \
@@ -265,7 +277,7 @@ sudo kubeadm init \
 ```
 
 - `--pod-network-cidr=192.168.0.0/16` — Calico 기본값. VM 서브넷
-  (`10.255.42.0/24`)과 겹치지 않는다. **겹치면 라우팅이 깨지므로 반드시 확인할 것.**
+  (`10.240.0.0/24`)과 겹치지 않는다. **겹치면 라우팅이 깨지므로 반드시 확인할 것.**
 - `--apiserver-advertise-address` — OpenStack VM은 NIC가 여러 개일 수 있어서
   명시하는 편이 안전하다.
 
@@ -303,7 +315,7 @@ source ~/.bashrc
 **worker1, worker2 각각에서** 2절에서 복사한 명령을 그대로 실행한다.
 
 ```bash
-sudo kubeadm join 10.255.42.124:6443 \
+sudo kubeadm join 10.240.0.18:6443 \
   --token <토큰> \
   --discovery-token-ca-cert-hash sha256:<해시>
 ```
@@ -449,6 +461,22 @@ kubectl get nodes -l ocr-bench/role=target
 
 이번엔 worker **2대 모두**에 붙인다. 파드를 8개까지 퍼뜨리려면 양쪽을 다 써야 한다.
 
+GPU 노드는 라벨을 **다르게** 붙인다. 같은 `role=target` 을 붙이면 CPU 측정
+파드가 GPU 노드로 새어 들어가 측정이 오염된다.
+
+```bash
+kubectl label node k8s-gpu ocr-bench/role=gpu
+kubectl label node k8s-gpu ocr-bench/accelerator=h100
+
+# GPU 노드는 taint 로 격리한다. 명시적으로 toleration 을 단 파드만 들어온다.
+kubectl taint node k8s-gpu nvidia.com/gpu=present:NoSchedule
+
+kubectl get nodes -o wide -L ocr-bench/role,ocr-bench/accelerator
+```
+
+`accelerator` 를 따로 두는 이유: 나중에 A100 노드를 붙이면 **매니페스트의
+`nodeSelector` 한 줄만 바꿔서** CPU / A100 / H100 비교가 된다.
+
 ---
 
 ## 7. [cp] 로컬 레지스트리
@@ -525,7 +553,9 @@ curl -s http://$CP_IP:30500/v2/_catalog     # {"repositories":[]}
 
 ### 7.2 [전체] containerd에 insecure registry 등록
 
-TLS 없이 평문 HTTP로 쓰므로, 노드마다 알려 줘야 한다. **3대 모두에서** 실행한다.
+TLS 없이 평문 HTTP로 쓰므로, 노드마다 알려 줘야 한다. **4대 모두에서** 실행한다.
+GPU 노드는 `nvidia-ctk` 가 `config.toml` 을 다시 쓰면서 이 설정을 날릴 수 있으니,
+`gpu-node.md` 3.4절에서 한 번 더 확인한다.
 
 **설정 키 이름이 containerd 버전마다 다르다.** 먼저 확인할 것:
 
@@ -534,7 +564,7 @@ containerd --version
 ```
 
 ```bash
-CP_IP=10.255.42.124
+CP_IP=10.240.0.18
 
 # hosts.toml 은 버전과 무관하게 같다
 sudo mkdir -p /etc/containerd/certs.d/$CP_IP:30500
@@ -634,7 +664,7 @@ cd k8s-platform
 ```
 
 ```bash
-CP_IP=10.255.42.124
+CP_IP=10.240.0.18
 IMAGE=$CP_IP:30500/ocr-workload:0.1.0-cpu
 
 sudo buildctl build \

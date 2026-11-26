@@ -18,5 +18,5 @@ resources:
 # 논리 이름만 알면 된다.
 images:
   - name: ocr-workload
-    newName: 10.255.42.124:30500/ocr-workload
+    newName: 10.240.0.18:30500/ocr-workload
     newTag: 0.1.0-cpu
