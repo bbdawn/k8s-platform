@@ -177,8 +177,13 @@ sysctl net.bridge.bridge-nf-call-iptables net.ipv4.ip_forward
 
 ### 1.4 containerd 설치
 
-**먼저 이미 깔려 있는지 본다.** 사내 OpenStack 이미지에는 containerd 2.2.1이
-구워져 있었다. 그러면 이 절은 통째로 건너뛰고 1.5로 간다.
+**먼저 이미 깔려 있는지 본다. 환경마다 다르다.**
+
+- 이전 OpenStack 이미지에는 containerd 2.2.1 이 구워져 있었다 -> 이 절을 건너뛴다.
+- 2026-11-26 의 새 OpenStack 이미지에는 **없었다** -> 아래대로 설치한다.
+
+어느 쪽이든 **1.5절은 반드시 해야 한다.** 이미 깔려 있더라도 CRI 가 꺼져
+있을 수 있다.
 
 ```bash
 containerd --version
@@ -206,11 +211,42 @@ sudo apt-get install -y containerd.io
 containerd --version          # 2.x 가 나와야 한다
 ```
 
-### 1.5 containerd 설정 — cgroup driver
+### 1.5 containerd 설정 — CRI 활성화 + cgroup driver
 
-**가장 흔한 실패 지점이다.** `SystemdCgroup = false`로 두면 kubelet과 containerd가
-서로 다른 cgroup driver를 써서, 노드가 `NotReady`에 머물거나 파드가 무작위로
-죽는다.
+**두 가지를 동시에 고친다. 이 절을 건너뛰면 `kubeadm init` 이 preflight 에서
+죽는다.**
+
+#### 함정 1 — Docker 저장소 패키지는 CRI 를 꺼 놓고 배포한다
+
+`containerd.io` 패키지가 설치하는 `/etc/containerd/config.toml` 에는 이 줄이
+들어 있다:
+
+```toml
+disabled_plugins = ["cri"]
+```
+
+Docker 데몬용으로 쓰라는 기본값이다. 쿠버네티스는 **CRI 로 containerd 와
+대화**하므로, 이 상태면 `kubeadm init` 이 이렇게 죽는다:
+
+```
+[ERROR CRI]: could not connect to the container runtime:
+  rpc error: code = Unimplemented desc = unknown service runtime.v1.RuntimeService
+```
+
+`containerd --version` 은 멀쩡히 나오고 `systemctl is-active` 도 `active` 라서,
+"containerd 는 도는데 왜 안 되지" 가 된다. **2026-11-26 새 환경에서 실제로
+걸렸다.** 이전 환경은 이미지에 CRI 가 켜진 containerd 가 구워져 있어서
+드러나지 않았던 차이다.
+
+#### 함정 2 — cgroup driver
+
+`SystemdCgroup = false` 로 두면 kubelet 과 containerd 가 서로 다른 cgroup
+driver 를 써서, 노드가 `NotReady` 에 머물거나 파드가 무작위로 죽는다.
+
+#### 해결 — 기본 설정을 통째로 다시 만든다
+
+`containerd config default` 가 만드는 설정에는 `disabled_plugins` 가 비어
+있다. 그래서 한 번에 둘 다 해결된다.
 
 ```bash
 sudo mkdir -p /etc/containerd
@@ -221,39 +257,128 @@ sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/conf
 
 sudo systemctl restart containerd
 sudo systemctl enable containerd
-
-# 확인 - true 가 나와야 한다
-grep SystemdCgroup /etc/containerd/config.toml
 ```
+
+```bash
+# 확인 - 세 가지를 전부 본다
+grep -n 'disabled_plugins\|SystemdCgroup' /etc/containerd/config.toml
+#   disabled_plugins = []        <- 비어 있어야 한다
+#   SystemdCgroup = true
+
+sudo ctr plugin ls | grep -i 'cri '
+#   io.containerd.grpc.v1.cri ... ok
+
+sudo crictl --runtime-endpoint unix:///run/containerd/containerd.sock version
+#   RuntimeName: containerd
+```
+
+`crictl` 은 `kubeadm` 패키지가 의존성으로 끌고 온다(1.6절). 아직 안 깔았으면
+앞의 두 줄만 봐도 된다.
 
 ### 1.6 kubeadm / kubelet / kubectl 설치
 
+세 패키지의 역할이 다르다. 셋 다 **4대 모두**에 깐다.
+
+| 패키지 | 하는 일 | 어디서 도나 |
+|---|---|---|
+| `kubelet` | 노드마다 떠서 파드를 실제로 띄우는 데몬 | **systemd 서비스** |
+| `kubeadm` | 클러스터를 세우고(`init`) 붙이는(`join`) 일회성 도구 | 사람이 실행 |
+| `kubectl` | API server 에 명령을 보내는 클라이언트 | 사람이 실행 |
+
+워커에는 `kubectl` 이 없어도 되지만, 문제가 생겼을 때 그 노드에서 바로 보려면
+있는 편이 낫다. 셋을 같이 깐다.
+
+#### 1) apt 키 디렉터리
+
 ```bash
-sudo curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
+sudo mkdir -p -m 755 /etc/apt/keyrings
+```
+
+`-m 755` 는 apt 가 키를 읽을 수 있게 하는 권한이다. 기본 umask 로 만들면
+`700` 이 되는 환경이 있어서 명시한다. docker 저장소 설정(1.4절)에서 이미
+만들었으면 아무 일도 일어나지 않는다 - `-p` 라서 오류도 안 난다.
+
+#### 2) 저장소 등록
+
+```bash
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.36/deb/Release.key \
   | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+```
 
-echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
-https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /' \
-  | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null
+```bash
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.36/deb/ /' \
+  | sudo tee /etc/apt/sources.list.d/kubernetes.list
+```
 
+**★ 주소에 마이너 버전(`v1.36`)이 박혀 있다.** 쿠버네티스 apt 저장소는
+마이너 버전마다 주소가 따로 있다. `v1.34` 주소를 그대로 두고 1.36 을 찾으면
+**오류가 아니라 "그런 패키지 없음"** 으로 나와서 한참 헤맨다. 나중에 1.37 로
+올릴 때도 이 줄을 먼저 바꿔야 한다.
+
+`gpg --dearmor` 는 사람이 읽는 ASCII 키를 apt 가 읽는 바이너리로 바꾸는 것이다.
+
+#### 3) 버전 고르기 - 설치 전에 반드시 본다
+
+```bash
 sudo apt-get update
-
-# 어떤 패치 버전이 있는지 먼저 본다. 셋 다 같은 버전으로 맞춰야 한다.
 apt-cache madison kubeadm | head -5
 ```
 
-위에서 나온 최신 버전을 `K8S_VER`에 넣는다 (예: `1.36.3-1.1`).
+```
+kubeadm | 1.36.7-1.1 | https://pkgs.k8s.io/core:/stable:/v1.36/deb  Packages
+kubeadm | 1.36.6-1.1 | ...
+```
+
+맨 위가 최신이다. **이 값을 4대에 똑같이 쓴다.**
+
+#### 4) 버전을 박아서 설치
 
 ```bash
-K8S_VER=1.36.x-1.1          # ← 위 출력에서 복사
+K8S_VER=1.36.7-1.1        # <- 3) 에서 본 값
 sudo apt-get install -y kubelet=$K8S_VER kubeadm=$K8S_VER kubectl=$K8S_VER
-
-# apt upgrade 가 멋대로 올려 버리지 않도록 고정한다.
-# 버전이 노드마다 어긋나면 join 이 실패하거나 조용히 이상하게 동작한다.
-sudo apt-mark hold kubelet kubeadm kubectl
-
-kubeadm version -o short
 ```
+
+`apt-get install -y kubelet kubeadm kubectl` 처럼 버전 없이 깔면 **노드마다
+설치 시점에 따라 다른 패치 버전이 들어간다.** 며칠 걸쳐 노드를 추가하면
+실제로 어긋난다. join 은 그래도 되는 경우가 많아서, 한참 뒤에 이상한 증상으로
+나타난다.
+
+#### 5) 버전 고정
+
+```bash
+sudo apt-mark hold kubelet kubeadm kubectl
+```
+
+`apt upgrade` 가 멋대로 올리지 못하게 막는다. 쿠버네티스 업그레이드는
+`kubeadm upgrade` 로 control plane -> 워커 순서를 지켜야 하는 작업이다.
+패키지 매니저가 kubelet 만 먼저 올려 버리면 버전 스큐 정책을 넘겨 노드가
+떨어져 나간다.
+
+푸는 것은 `sudo apt-mark unhold kubelet kubeadm kubectl`.
+
+#### 6) 확인
+
+```bash
+kubeadm version -o short
+kubelet --version
+kubectl version --client -o yaml | grep gitVersion
+```
+
+4대 모두 **`v1.36.7`** 로 같아야 한다.
+
+```bash
+apt-mark showhold          # 세 패키지가 나와야 한다
+```
+
+> **kubelet 이 계속 재시작해도 정상이다.** 이 시점에는 설정 파일
+> (`/var/lib/kubelet/config.yaml`) 이 없어서 `kubeadm init` / `join` 을
+> 기다리는 상태다. `systemctl status kubelet` 에 `activating (auto-restart)`
+> 가 보여도 넘어간다. init/join 뒤에 `active (running)` 이 된다.
+
+#### GPU 노드도 똑같이 한다
+
+GPU 노드는 **이 절을 빼는 것이 아니라 더하는 것**이다. 1절 전체를 그대로 하고,
+드라이버와 toolkit(`gpu-node.md` 2·3절)을 추가로 한 뒤에 join 한다.
 
 ### 1.7 [전체] 여기까지 확인
 
