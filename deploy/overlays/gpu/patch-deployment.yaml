@@ -18,7 +18,14 @@ spec:
       # 측정 대상을 GPU 노드로 바꾼다. 머신 이름(k8s-gpu)이 아니라 accelerator
       # label 을 쓰는 이유는 base 와 같다 - 나중에 A100 노드를 붙이면 이 한 줄만
       # 바꿔서 같은 실험을 돌릴 수 있다.
+      #
+      # $patch: replace 가 없으면 안 된다. nodeSelector 는 map 이라 strategic
+      # merge 가 덮어쓰지 않고 '합친다'. 그러면 base 의 ocr-bench/role=target 이
+      # 그대로 남아서 "accelerator=h100 이면서 role=target" 인 노드를 찾게 되는데,
+      # k8s-gpu 의 role 은 gpu 라 그런 노드가 없다. 파드는 Pending 에 머물고
+      # 이미지도 GPU 도 멀쩡하니 원인이 엉뚱한 데서 찾아진다.
       nodeSelector:
+        $patch: replace
         ocr-bench/accelerator: h100
       # GPU 노드에는 nvidia.com/gpu=present:NoSchedule taint 가 걸려 있다.
       # 비싼 자원이라 명시적으로 요청한 파드만 들이기 위한 것이고, 이 선언이
