@@ -702,12 +702,60 @@ server = "http://$CP_IP:30500"
 EOF
 ```
 
-`config.toml` 에 certs.d 를 보라고 알려 준다. 기본값이 아니라서 반드시 넣어야
-하는데, **플러그인 이름이 1.7 과 2.x 에서 다르다.** 틀린 이름으로 넣으면 조용히
-무시되고 `ImagePullBackOff` 가 난다.
+`config.toml` 에 certs.d 를 보라고 알려 준다. **이것을 빼먹으면 조용히
+무시되고 `ImagePullBackOff` 가 난다.**
+
+#### ★ 버전마다 다르다 - 반드시 현재 값을 먼저 본다
+
+| containerd | `config_path` 기본값 |
+|---|---|
+| 1.7.x | 없음 (키 이름도 다르다) |
+| 2.2.1 | `'/etc/containerd/certs.d:/etc/docker/certs.d'` - **이미 들어 있다** |
+| **2.4.2** | **`''` (빈 문자열) - 넣어야 한다** |
+
+2026-11-27 의 2.4.2 환경에서 실제로 비어 있었다. 2.2.1 때의 기억으로
+"이미 있겠지" 하고 넘어가면 나중에 파드가 안 뜬다.
 
 ```bash
-# containerd 1.7.x
+grep -n -B10 "config_path = ''" /etc/containerd/config.toml \
+  | grep -E "^\s*[0-9]+[-:]\s*\[|config_path"
+```
+
+```
+30-    [plugins.'io.containerd.cri.v1.images'.registry]
+31:      config_path = ''                                  <- 이것
+250-  [plugins.'io.containerd.transfer.v1.local']
+255:    config_path = ''                                   <- 건드리지 말 것
+```
+
+**`config_path` 는 여러 군데 있다.** `transfer.v1.local` 쪽을 고치면 아무
+일도 일어나지 않는다. `cri.v1.images.registry` 아래 것이어야 한다.
+
+#### 고치는 법 - 섹션을 찾아서 값만 바꾼다
+
+`tee -a` 로 섹션을 통째로 덧붙이면 **TOML 중복 키 오류로 containerd 가 아예
+뜨지 않는다.** 이미 그 섹션이 존재하기 때문이다. 줄 번호도 노드마다 다를 수
+있으므로 섹션을 찾아서 고친다.
+
+```bash
+sudo python3 - <<'EOF'
+p = "/etc/containerd/config.toml"
+s = open(p).read()
+key = "[plugins.'io.containerd.cri.v1.images'.registry]"
+i = s.index(key)
+j = s.index("config_path", i)
+k = s.index("\n", j)
+old = s[j:k].strip()
+s = s[:j] + "config_path = '/etc/containerd/certs.d'" + s[k:]
+open(p, "w").write(s)
+print("변경:", old, "->", "config_path = '/etc/containerd/certs.d'")
+EOF
+```
+
+섹션 자체가 없는 1.7.x 라면 그때만 덧붙인다:
+
+```bash
+# containerd 1.7.x 전용 - 키 이름이 다르다
 grep -q 'config_path' /etc/containerd/config.toml || \
 sudo tee -a /etc/containerd/config.toml >/dev/null <<'EOF'
 
@@ -717,24 +765,32 @@ EOF
 ```
 
 ```bash
-# containerd 2.x
-grep -q 'config_path' /etc/containerd/config.toml || \
-sudo tee -a /etc/containerd/config.toml >/dev/null <<'EOF'
-
-[plugins.'io.containerd.cri.v1.images'.registry]
-  config_path = '/etc/containerd/certs.d'
-EOF
-```
-
-```bash
+grep -n -A3 "images'.registry\]" /etc/containerd/config.toml
 sudo systemctl restart containerd
 ```
 
 ```bash
 # 확인 - 레지스트리에서 받아지는지
-sudo ctr -n k8s.io images pull --plain-http $CP_IP:30500/nothing:latest 2>&1 | tail -2
-# "not found" 면 통신은 된 것이다. "connection refused" 면 막힌 것이다.
+sudo ctr -n k8s.io images pull --hosts-dir /etc/containerd/certs.d \
+  $CP_IP:30500/nothing:latest 2>&1 | tail -2
+# "not found" 면 통신은 된 것이다. "connection refused" 나
+# "http: server gave HTTP response to HTTPS client" 면 설정이 안 먹은 것이다.
 ```
+
+**`--hosts-dir` 가 필요한 이유:** `ctr` 은 CRI 플러그인을 거치지 않아서
+`config.toml` 의 `config_path` 를 읽지 않는다. 직접 알려 줘야 한다. kubelet 은
+CRI 를 통하므로 `config.toml` 설정만으로 충분하다. 지난 클러스터에서 이것을
+모르고 "설정했는데 왜 안 되지" 로 시간을 썼다.
+
+> **GPU 노드에서 containerd 를 재시작할 때.** 그 노드의 컨테이너가 모두 잠깐
+> 끊긴다. gpu-operator 파드들이 다시 뜨는 동안 `nvidia.com/gpu` 가 몇 초간
+> 0 이 될 수 있다. 직후에 GPU 파드를 띄우면 `Insufficient nvidia.com/gpu` 로
+> Pending 이 난다. 재시작 뒤 cp 에서 한 번 확인하고 넘어간다:
+>
+> ```bash
+> kubectl -n gpu-operator get pods -o wide
+> kubectl describe node k8s-gpu | grep 'nvidia.com/gpu'
+> ```
 
 ---
 
