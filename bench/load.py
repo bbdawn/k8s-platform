@@ -158,7 +158,7 @@ def main() -> int:
     print(f"설정    concurrency={args.concurrency}  requests={args.requests}  warmup={args.warmup}")
     print()
 
-    def run_phase(total: int) -> list[dict]:
+    def run_phase(total: int, show_progress: bool = False) -> list[dict]:
         counter = [0]
         lock = threading.Lock()
         results: list[dict] = []
@@ -169,6 +169,25 @@ def main() -> int:
         t0 = time.perf_counter()
         for t in threads:
             t.start()
+
+        # 진행 표시. CPU 로 돌리면 한 건에 수 초가 걸려서 50건이 5분을 넘는데,
+        # 아무것도 찍히지 않으면 멈춘 것과 구별할 수 없다. 실제로 그렇게 보였다.
+        # stderr 로 내보내므로 stdout 을 파일로 리다이렉트해도 결과만 깔끔하게 남는다.
+        if show_progress and sys.stderr.isatty():
+            while any(t.is_alive() for t in threads):
+                done = len(results)
+                el = time.perf_counter() - t0
+                rate = done / el if el > 0 else 0
+                eta = (total - done) / rate if rate > 0 else float("nan")
+                sys.stderr.write(
+                    f"\r  진행 {done:>4}/{total}  경과 {el:6.1f}s  "
+                    f"속도 {rate:5.2f} req/s  남은 시간 ~{eta:5.0f}s   "
+                )
+                sys.stderr.flush()
+                time.sleep(1.0)
+            sys.stderr.write("\r" + " " * 78 + "\r")
+            sys.stderr.flush()
+
         for t in threads:
             t.join()
         for r in results:
@@ -190,7 +209,7 @@ def main() -> int:
         print()
 
     t0 = time.perf_counter()
-    results = run_phase(args.requests)
+    results = run_phase(args.requests, show_progress=True)
     wall = time.perf_counter() - t0
 
     ok = [r for r in results if r["ok"]]
