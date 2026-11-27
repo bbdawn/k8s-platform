@@ -731,6 +731,23 @@ grep -n -B10 "config_path = ''" /etc/containerd/config.toml \
 **`config_path` 는 여러 군데 있다.** `transfer.v1.local` 쪽을 고치면 아무
 일도 일어나지 않는다. `cri.v1.images.registry` 아래 것이어야 한다.
 
+#### ★ GPU 노드는 따옴표가 다르다
+
+`nvidia-ctk runtime configure` 를 돌린 노드는 **`config.toml` 의 TOML 표기가
+큰따옴표로 정규화된다.** 드롭인(`conf.d/99-nvidia.toml`)만 쓰는 줄 알았는데
+본 파일의 표기도 바꿔 놓는다.
+
+```
+# 일반 노드 (containerd config default 가 만든 그대로)
+[plugins.'io.containerd.cri.v1.images'.registry]
+
+# GPU 노드 (nvidia-ctk 가 다시 쓴 뒤)
+[plugins."io.containerd.cri.v1.images".registry]
+```
+
+작은따옴표로만 찾는 스크립트는 GPU 노드에서 `ValueError: substring not found`
+로 죽는다. **아래 스크립트는 따옴표를 가리지 않는다.**
+
 #### 고치는 법 - 섹션을 찾아서 값만 바꾼다
 
 `tee -a` 로 섹션을 통째로 덧붙이면 **TOML 중복 키 오류로 containerd 가 아예
@@ -739,16 +756,19 @@ grep -n -B10 "config_path = ''" /etc/containerd/config.toml \
 
 ```bash
 sudo python3 - <<'EOF'
+import re
 p = "/etc/containerd/config.toml"
 s = open(p).read()
-key = "[plugins.'io.containerd.cri.v1.images'.registry]"
-i = s.index(key)
-j = s.index("config_path", i)
-k = s.index("\n", j)
-old = s[j:k].strip()
-s = s[:j] + "config_path = '/etc/containerd/certs.d'" + s[k:]
-open(p, "w").write(s)
-print("변경:", old, "->", "config_path = '/etc/containerd/certs.d'")
+m = re.search(r"""\[plugins\.['"]io\.containerd\.cri\.v1\.images['"]\.registry\]""", s)
+if not m:
+    print("registry 섹션 없음 - config.toml 을 다시 생성해야 한다")
+else:
+    j = s.index("config_path", m.end())
+    k = s.index("\n", j)
+    print("변경 전:", s[j:k].strip())
+    s = s[:j] + 'config_path = "/etc/containerd/certs.d"' + s[k:]
+    open(p, "w").write(s)
+    print('변경 후: config_path = "/etc/containerd/certs.d"')
 EOF
 ```
 
