@@ -8,8 +8,11 @@ spec:
   # ClusterIP가 아니라 NodePort다. <노드IP>:30800으로 바로 열어 볼 수 있고,
   # kubectl port-forward도 그대로 쓸 수 있다.
   type: NodePort
+  # variant 까지 봐야 한다. deployment.yaml 주석 참고 - 이게 없으면 CPU 서비스가
+  # GPU 파드를, GPU 서비스가 CPU 파드를 잡는다.
   selector:
     app: ocr
+    ocr-bench/variant: cpu
   ports:
     - name: http
       port: 8000

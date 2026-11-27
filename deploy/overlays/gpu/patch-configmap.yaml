@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ocr-config
+data:
+  # 이 한 줄이 실험의 변수다.
+  #
+  #   gpu:0  GPU 로 추론
+  #   cpu    같은 이미지, 같은 노드, 같은 자원으로 CPU 추론
+  #
+  # 두 값으로 한 번씩 재면 머신·메모리·이미지·모델이 전부 고정된 채
+  # **실행 장치 하나만** 달라진 비교가 된다. 노드를 갈라서 비교하면 CPU 모델과
+  # 메모리 대역폭 차이가 섞여 들어가므로, 이쪽이 훨씬 깨끗하다.
+  #
+  #   kubectl -n ocr-bench set env deploy/ocr-gpu OCR_DEVICE=cpu   <- 는 쓰지 말 것.
+  #   envFrom 으로 읽으므로 이 파일을 고치고 apply -k 해야 한다.
+  OCR_DEVICE: "gpu:0"

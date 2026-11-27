@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr
+spec:
+  selector:
+    app: ocr
+    ocr-bench/variant: gpu
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+      # base 는 30800 이다. CPU 배포와 동시에 띄울 수 있어야 하므로 포트를
+      # 나눈다. nodePort 는 클러스터 전체에서 유일해야 한다.
+      nodePort: 30801

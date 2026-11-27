@@ -1,0 +1,129 @@
+# OCR inference workload - GPU 이미지.
+#
+#   build:
+#     buildctl build --frontend dockerfile.v0 \
+#       --local context=workloads/inference \
+#       --local dockerfile=workloads/inference \
+#       --opt filename=Dockerfile.gpu \
+#       --output type=image,name=<CP_IP>:30500/ocr-workload:0.1.0-gpu,push=true,registry.insecure=true
+#
+# CPU 이미지(Dockerfile)와 **같은 코드, 같은 모델**을 쓴다. 다른 것은 단 하나,
+# paddlepaddle 이 CPU 빌드냐 GPU(cu126) 빌드냐다. 실행 장치는 런타임에
+# OCR_DEVICE 환경변수로 고른다(app/gpu.py).
+#
+# 왜 CPU 이미지에 paddlepaddle-gpu 만 얹지 않는가:
+#   paddlepaddle-gpu 는 CUDA 런타임과 cuDNN·cuBLAS 를 필요로 한다. NVIDIA
+#   container toolkit 이 컨테이너에 넣어 주는 것은 **드라이버**(libcuda.so)
+#   뿐이고 런타임 라이브러리는 아니다. 그래서 베이스를 nvidia/cuda 의
+#   cudnn-runtime 이미지로 바꾼다.
+
+# ---------------------------------------------------------------------------
+# 베이스 이미지.
+#
+# 드라이버가 570.211.01 이고 nvidia-smi 가 CUDA 12.8 까지 받아 준다. 12.6
+# 런타임은 그 아래이므로 문제없다(드라이버는 상위 호환).
+#
+# 태그가 바뀌었을 수 있으니 확인하는 법:
+#   curl -s 'https://hub.docker.com/v2/repositories/nvidia/cuda/tags/?page_size=100&name=12.6' | grep -o '"name":"[^"]*"'
+# 바꿔 끼우려면: --opt build-arg:CUDA_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+# ---------------------------------------------------------------------------
+ARG CUDA_IMAGE=nvidia/cuda:12.6.0-cudnn-runtime-ubuntu24.04
+
+# ---------------------------------------------------------------------------
+# 1단계: 모델만 굽는다. CPU 빌드 paddle 로.
+#
+# 이 단계를 따로 두는 이유가 중요하다. 이미지를 빌드하는 노드(worker1)에는
+# GPU 가 없다. 거기서 paddlepaddle-gpu 를 import 하면 libcuda.so.1 을 찾지
+# 못해 죽을 수 있다. 모델 파일 자체는 장치와 무관하므로, CPU paddle 로 받아서
+# 2단계에 복사해 넣는다.
+#
+# 굽지 않으면 파드가 뜰 때마다 수백 MB 를 내려받아 기동이 느려지고, 벤치마크
+# 에서 파드를 반복 재시작할 때마다 되풀이된다.
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim AS models
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    HOME=/home/app
+
+RUN mkdir -p ${HOME}
+WORKDIR /app
+
+COPY app/requirements.txt .
+RUN pip install paddlepaddle==3.3.1 \
+ && pip install -r requirements.txt
+
+COPY app/ .
+
+# OCR_DEVICE=cpu 를 명시한다. 이 단계에는 GPU 가 없으므로 auto 로 둬도 cpu 가
+# 되지만, 빌드가 환경에 따라 달라지지 않게 박아 둔다.
+RUN OCR_DEVICE=cpu python -c "import ocr; ocr.create_ocr_engine()"
+
+# ---------------------------------------------------------------------------
+# 2단계: 실행 이미지.
+# ---------------------------------------------------------------------------
+FROM ${CUDA_IMAGE}
+
+# ubuntu24.04 기반이라 python3 가 3.12 다. CPU 이미지(python:3.12-slim)와
+# 같은 파이썬 마이너 버전을 쓰는 것이 중요하다 - 두 이미지의 차이를
+# "paddle 빌드" 하나로 좁혀야 비교가 깨끗하다.
+#
+#   libgomp1              paddle 의 libpaddle.so 가 요구
+#   libgl1, libglib2.0-0  paddleocr 가 쓰는 opencv 가 요구
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 python3-venv \
+      libgomp1 libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Ubuntu 24.04 는 PEP 668 때문에 시스템 파이썬에 pip 설치를 거부한다
+# (externally-managed-environment). venv 를 쓰는 것이 정석이고,
+# 시스템 패키지와 섞이지 않아 더 깨끗하다.
+RUN python3 -m venv /opt/venv
+ENV PATH=/opt/venv/bin:$PATH
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+ARG APP_UID=10001
+
+# CPU 이미지와 같은 이유로 HOME 을 고정한다. /etc/passwd 에 없는 UID 로 실행
+# 되면 HOME 이 '/' 가 되고, paddlex 가 '~/.paddlex' 를 '/.paddlex' 로 해석해
+# 루트에 쓰려다 PermissionError 로 죽는다.
+ENV HOME=/home/app
+RUN mkdir -p ${HOME}
+
+WORKDIR /app
+
+COPY app/requirements.txt .
+
+# paddlepaddle-gpu 는 PyPI 에 없다. PaddlePaddle 이 운영하는 cu126 인덱스에서
+# 받는다. CPU 이미지의 `pip install paddlepaddle==3.3.1` 에 대응하는 줄이고,
+# **이 한 줄이 두 이미지의 유일한 실질적 차이**다.
+RUN pip install paddlepaddle-gpu==3.3.1 \
+      -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+# 나머지 의존성은 PyPI 에서. 레이어를 나눠 두면 앱 의존성이 바뀌어도
+# 수 GB 짜리 paddle 을 다시 받지 않는다.
+RUN pip install -r requirements.txt
+
+COPY app/ .
+
+# 1단계에서 구운 모델을 가져온다. 장치와 무관한 파일이라 그대로 쓸 수 있다.
+COPY --from=models /home/app/.paddlex /home/app/.paddlex
+
+RUN chown -R ${APP_UID}:0 ${HOME} /app \
+ && chmod -R g=u ${HOME} /app
+
+USER ${APP_UID}
+
+EXPOSE 8000
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]

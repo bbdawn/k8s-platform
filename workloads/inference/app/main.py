@@ -37,11 +37,31 @@ class HealthResponse(BaseModel):
     status: str
 
 
+class GpuInfo(BaseModel):
+    """/info 의 gpu 블록. CPU 이미지에서는 cuda_available=False 로 나온다.
+
+    측정 결과를 기록할 때 "어떤 장치에서 쟀는가"가 수치만큼 중요하다.
+    파드 안에서 curl 한 번으로 드라이버·장치·paddle 빌드를 모두 확인할 수 있게
+    한곳에 모아 둔다.
+    """
+
+    cuda_available: bool = False
+    gpu_count: int = 0
+    gpu_name: str | None = None
+    gpu_memory_total_mb: int | None = None
+    compiled_with_cuda: bool = False
+    paddle_version: str | None = None
+    paddle_device: str | None = None
+    device_setting: str | None = None
+    error: str | None = None
+
+
 class InfoResponse(BaseModel):
     paddle_version: str | None = None
     device: str
     ocr_ready: bool
     error: str | None = None
+    gpu: GpuInfo | None = None
 
 
 class TextItem(BaseModel):

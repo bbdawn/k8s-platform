@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr
+spec:
+  # base 의 variant=cpu 를 gpu 로 바꾼다. selector 와 파드 라벨을 함께 바꿔야
+  # Service 가 제 파드만 잡는다. (base deployment.yaml 주석 참고)
+  selector:
+    matchLabels:
+      app: ocr
+      ocr-bench/variant: gpu
+  template:
+    metadata:
+      labels:
+        app: ocr
+        ocr-bench/variant: gpu
+    spec:
+      # 측정 대상을 GPU 노드로 바꾼다. 머신 이름(k8s-gpu)이 아니라 accelerator
+      # label 을 쓰는 이유는 base 와 같다 - 나중에 A100 노드를 붙이면 이 한 줄만
+      # 바꿔서 같은 실험을 돌릴 수 있다.
+      nodeSelector:
+        ocr-bench/accelerator: h100
+      # GPU 노드에는 nvidia.com/gpu=present:NoSchedule taint 가 걸려 있다.
+      # 비싼 자원이라 명시적으로 요청한 파드만 들이기 위한 것이고, 이 선언이
+      # 그 "명시" 에 해당한다.
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: ocr
+          resources:
+            requests:
+              cpu: "1500m"
+              memory: 3Gi
+              # requests 에도 넣어야 한다. nvidia.com/gpu 는 확장 자원이라
+              # requests 와 limits 가 같아야 하고, 한쪽만 쓰면 거부된다.
+              nvidia.com/gpu: 1
+            limits:
+              cpu: "1500m"
+              memory: 3Gi
+              nvidia.com/gpu: 1
+          # GPU 에서는 모델 로드와 워밍업이 CPU 보다 빠르지만, 첫 CUDA 컨텍스트
+          # 생성과 cuDNN 자동 튜닝에 시간이 든다. base 의 startup probe
+          # (10s x 30 = 5분)를 그대로 둔다. 넉넉한 쪽이 안전하다.

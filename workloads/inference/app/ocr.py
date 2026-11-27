@@ -16,9 +16,17 @@ from PIL import Image, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
-# PaddleOCR은 device 문자열을 명시적으로 받는다. 여기서 고정해 두면 다른 것을
-# 자동으로 골라잡는 일이 없다.
-DEVICE = "cpu"
+# PaddleOCR은 device 문자열을 명시적으로 받는다("cpu" / "gpu:0").
+#
+# 이 프로젝트의 비교 축 하나가 실행 장치다. 같은 이미지·같은 모델·같은 노드에서
+# OCR_DEVICE 만 바꿔 CPU 와 GPU 를 재려면, 장치가 코드에 박혀 있으면 안 된다.
+# gpu.resolve_device() 가 OCR_DEVICE 를 읽어 결정한다.
+#
+# 벤치마크에서는 ConfigMap 에 cpu / gpu:0 을 **명시**할 것. 기본값 auto 는
+# 환경에 따라 장치가 바뀌어서 측정 조건이 조용히 달라진다.
+from gpu import resolve_device
+
+DEVICE = resolve_device()
 
 # --- configuration (전부 env / ConfigMap 으로 덮어쓸 수 있다) -----------------
 
@@ -156,6 +164,15 @@ def runtime_info() -> dict:
     except Exception as exc:  # noqa: BLE001 - reporting beats crashing here
         info["error"] = f"{type(exc).__name__}: {exc}"
         logger.warning("paddle import failed: %s", exc)
+
+    # GPU 쪽 정보를 함께 싣는다. 측정 결과를 기록할 때 "어떤 장치에서 쟀는가"가
+    # 수치만큼 중요하다. CPU 이미지에서는 cuda_available=False 로 나온다.
+    try:
+        from gpu import get_gpu_info
+
+        info["gpu"] = get_gpu_info()
+    except Exception as exc:  # noqa: BLE001
+        info["gpu"] = {"error": f"{type(exc).__name__}: {exc}"}
     return info
 
 

@@ -5,6 +5,21 @@ metadata:
 data:
   OCR_LANG: "korean"
 
+  # 실행 장치. 이 프로젝트의 비교 축 하나다. app/gpu.py 가 읽는다.
+  #
+  #   cpu     CPU 로 추론
+  #   gpu:0   첫 번째 GPU 로 추론
+  #   auto    쓸 수 있으면 GPU, 아니면 CPU  <- 벤치마크에서 쓰지 말 것
+  #
+  # auto 를 쓰지 않는 이유: 측정 조건이 환경에 따라 조용히 달라진다. 같은
+  # 매니페스트로 CPU 노드와 GPU 노드에 배포하면 서로 다른 것을 재게 되고,
+  # 나중에 수치만 보고는 어느 장치였는지 알 수 없다. 늘 명시한다.
+  #
+  # CPU 빌드 이미지(Dockerfile)에서는 gpu:0 을 줘도 CUDA 가 없어 실패한다.
+  # GPU 빌드 이미지(Dockerfile.gpu)는 cpu / gpu:0 둘 다 된다 - 그래서 같은
+  # 이미지로 같은 노드에서 장치만 바꿔 비교할 수 있다.
+  OCR_DEVICE: "cpu"
+
   # 파드당 predict() 한 번. 비교 축은 파드 개수이지 파드 내부 스레드가 아니다.
   # README 5.1 참고.
   OCR_MAX_CONCURRENCY: "1"

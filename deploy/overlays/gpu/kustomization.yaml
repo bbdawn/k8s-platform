@@ -1,0 +1,48 @@
+# GPU 노드용 overlay.
+#
+#   kubectl apply -k deploy/overlays/gpu
+#
+# base(deploy/k8s)와 달라지는 것은 네 가지뿐이다:
+#   1. 이미지 태그          0.1.0-cpu -> 0.1.0-gpu  (paddlepaddle-gpu 빌드)
+#   2. 올라갈 노드          role=target -> accelerator=h100 + toleration
+#   3. 요청 자원            nvidia.com/gpu: 1 추가
+#   4. OCR_DEVICE           cpu -> gpu:0
+#
+# **일부러 바꾸지 않은 것들**이 더 중요하다. cpu/memory limits(1500m/3Gi),
+# OCR_MAX_IMAGE_SIDE(640), OCR_CPU_THREADS(1), 모델 조합을 base 그대로 둔다.
+# 이것들이 달라지면 CPU 측정값과 비교가 불가능해진다. GPU 에는 94GB 가 있으니
+# 해상도를 올리고 싶어지는데, 그 순간 "장치만 바꿔 비교한다"는 전제가 깨진다.
+# 해상도를 바꾸는 실험은 장치 비교가 끝난 뒤에 따로 한다.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ocr-bench
+
+resources:
+  - ../../k8s
+
+# base 의 ocr / ocr-config 와 이름이 겹치지 않게 한다. CPU 배포와 GPU 배포를
+# 같은 네임스페이스에 동시에 띄워 놓고 비교할 수 있다.
+nameSuffix: -gpu
+
+# base 가 이미 ocr-workload -> 10.240.0.18:30500/ocr-workload:0.1.0-cpu 로
+# 바꿔 놓은 뒤라서, 여기서는 **변환된 이름**으로 찾아야 한다. 원래 이름
+# (ocr-workload)으로 쓰면 아무 일도 일어나지 않고 CPU 태그가 그대로 남는다.
+# 조용히 틀리는 자리다 - apply 전에 kubectl kustomize 로 image: 줄을 꼭 볼 것.
+images:
+  - name: 10.240.0.18:30500/ocr-workload
+    newTag: 0.1.0-gpu
+
+patches:
+  - path: patch-deployment.yaml
+  - path: patch-configmap.yaml
+  - path: patch-service.yaml
+  # topologySpreadConstraints 는 base 에서 worker 2대에 파드를 고르게 퍼뜨리기
+  # 위한 것이다. GPU 노드는 1대뿐이라 의미가 없고, labelSelector 가 app=ocr 라
+  # 다른 노드의 CPU 파드까지 세어 버려서 GPU 파드가 Pending 에 걸린다.
+  - target:
+      kind: Deployment
+      name: ocr
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/topologySpreadConstraints
