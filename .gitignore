@@ -8,3 +8,6 @@ venv/
 # PaddleOCR downloads models here on first run
 .paddlex/
 output/
+
+# 측정 결과 JSON
+bench/results/
