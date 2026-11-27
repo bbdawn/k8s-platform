@@ -527,49 +527,117 @@ device plugin은 이 taint를 견디도록 되어 있다.
 
 ---
 
-## 7. [cp] NVIDIA device plugin
+## 7. [cp] gpu-operator
 
-kubelet은 CPU와 메모리만 안다. **`nvidia.com/gpu` 라는 자원이 존재한다는 것을
-알려 주는 것이 device plugin이다.** DaemonSet으로 돌면서 노드의 GPU를 세어
-kubelet에 등록한다.
+kubelet 은 CPU 와 메모리만 안다. **`nvidia.com/gpu` 라는 자원이 존재한다는 것을
+알려 주는 것이 device plugin** 이다. 그것만 따로 깔 수도 있지만, 이 프로젝트는
+**gpu-operator** 를 쓴다.
 
-### 7.1 설치
+| | 수동 device plugin | gpu-operator |
+|---|---|---|
+| 설치 | 매니페스트 1장 | Helm 차트 |
+| 들어오는 것 | device plugin 만 | device plugin + **DCGM Exporter** + **MIG Manager** + GFD + NFD + validator |
+| 이 프로젝트에 | 2.5절(사용률)·2.4절(MIG)을 직접 구축해야 함 | **둘 다 딸려 온다** |
+| 실제 운영 | 소규모 실습 | GPU 클러스터 표준 |
+
+ROADMAP 2.4(GPU 분할)·2.5(사용률 수집)가 포트폴리오의 중심이므로 operator 가
+맞다. MIG Manager 는 라벨 한 줄로 MIG 프로파일을 바꿔 주고, DCGM Exporter 는
+Prometheus 가 긁을 수 있는 `/metrics` 를 띄운다.
+
+### 7.1 ★ driver 와 toolkit 은 반드시 끈다
+
+**이 절에서 가장 중요한 것.** operator 는 기본적으로 드라이버와 container
+toolkit 을 **컨테이너로 자기가 설치한다.** 2·3절에서 호스트에 이미 깔았는데
+그 위에 또 깔면 **호스트 드라이버와 충돌해 노드가 통째로 망가진다.**
+
+| 컴포넌트 | 값 | 이유 |
+|---|---|---|
+| `driver.enabled` | **`false`** | 호스트에 570.211.01 설치됨 (2절) |
+| `toolkit.enabled` | **`false`** | `nvidia-ctk` 로 containerd 등록 완료 (3절) |
+| device plugin | 기본(true) | operator 가 관리 |
+| DCGM Exporter | 기본(true) | Prometheus 연동 |
+| MIG Manager | 기본(true) | 분할 실험 |
+| NFD / GFD | 기본(true) | GPU 노드 자동 라벨링 |
+
+### 7.2 사전 정리
 
 ```bash
-DP=$(curl -s https://api.github.com/repos/NVIDIA/k8s-device-plugin/releases/latest \
-     | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)
-echo "device plugin $DP"
-
-kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/$DP/deployments/static/nvidia-device-plugin.yml
+# [cp] 수동 device plugin 이 있으면 지운다. 둘이 같은 GPU 를 등록하려고 다툰다.
+kubectl -n kube-system get ds | grep -i nvidia
+kubectl -n kube-system delete ds nvidia-device-plugin-daemonset 2>/dev/null
 ```
 
-> **gpu-operator를 쓰지 않는 이유.** operator는 드라이버·toolkit·plugin·DCGM을
-> 한 번에 깔아 주지만, 각 조각이 무엇을 하는지가 가려진다. 지금은 **배우고
-> 설명하는 것이 목적**이므로 손으로 쌓는다. 나중에 노드가 늘면 operator로
-> 바꾸는 편이 맞고, 그 판단 근거를 아는 상태가 된다.
-
-### 7.2 확인 — 세 단계로
-
 ```bash
-# 1) 파드가 떴나
-kubectl -n kube-system get pods -l name=nvidia-device-plugin-ds -o wide
-kubectl -n kube-system logs -l name=nvidia-device-plugin-ds --tail=30
+# [gpu 노드] 호스트 DCGM 서비스가 돌면 operator 의 dcgm-exporter 와 5555 가 겹친다.
+# 2.4절에서 본 것처럼 이미지에 datacenter-gpu-manager 가 깔려 있을 수 있다.
+systemctl is-active nvidia-dcgm 2>/dev/null; ss -ltnp | grep 5555
+sudo systemctl disable --now nvidia-dcgm 2>/dev/null
 ```
 
-로그에 `Registered device plugin for 'nvidia.com/gpu' with Kubelet` 이 나와야 한다.
+### 7.3 Helm 과 설치
 
 ```bash
-# 2) 노드 자원에 올라왔나  ← 가장 중요한 확인
+# [cp]
+curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+helm version
+```
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia && helm repo update
+helm search repo nvidia/gpu-operator --versions | head -5
+```
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  -n gpu-operator --create-namespace \
+  --set driver.enabled=false \
+  --set toolkit.enabled=false \
+  --wait --timeout 10m
+```
+
+`--wait` 라 전부 뜰 때까지 **5~10분** 걸린다. 조용해 보여도 기다릴 것.
+
+### 7.4 확인
+
+```bash
+kubectl -n gpu-operator get pods -o wide
+```
+
+떠야 하는 것 (GPU 노드에만):
+
+```
+gpu-operator-xxxxx                        1/1  Running
+gpu-feature-discovery-xxxxx               1/1  Running
+nvidia-device-plugin-daemonset-xxxxx      1/1  Running
+nvidia-dcgm-exporter-xxxxx                1/1  Running
+nvidia-operator-validator-xxxxx           1/1  Running
+nvidia-mig-manager-xxxxx                  1/1  Running
+nvidia-cuda-validator-xxxxx               0/1  Completed
+```
+
+**`nvidia-driver-daemonset` 과 `nvidia-container-toolkit-daemonset` 이 없어야
+정상이다** - 7.1절에서 껐기 때문이다. 이 둘이 보이면 `--set` 이 빠진 것이므로
+즉시 `helm uninstall` 하고 다시 깔 것.
+
+```bash
+# ★ 가장 중요한 확인
 kubectl describe node k8s-gpu | grep -E 'nvidia.com/gpu'
-```
-
-```
-  nvidia.com/gpu:     1      ← Capacity
-  nvidia.com/gpu:     1      ← Allocatable
+#   nvidia.com/gpu:  1      <- Capacity
+#   nvidia.com/gpu:  1      <- Allocatable
 ```
 
 ```bash
-# 3) 실제로 파드가 GPU 를 쓰나
+# NFD 가 붙인 하드웨어 라벨
+kubectl get node k8s-gpu -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep nvidia
+```
+
+`nvidia.com/gpu.product`, `nvidia.com/gpu.memory`, 그리고 **`nvidia.com/mig.capable=true`**
+가 보여야 한다. 마지막 것이 ROADMAP 2.4절(MIG 분할 실험)이 가능하다는 최종
+확인이다.
+
+### 7.5 실제 파드로 검증
+
+```bash
 kubectl apply -f - <<'EOF'
 apiVersion: v1
 kind: Pod
@@ -597,20 +665,107 @@ kubectl logs gpu-check
 kubectl delete pod gpu-check
 ```
 
-**`kubectl logs`에 H100이 나오면 GPU 노드는 완성이다.**
+**`kubectl logs` 에 H100 NVL 이 나오면 GPU 노드는 완성이다.**
 
-파드가 `Pending`에서 안 움직이면:
-
-```bash
-kubectl describe pod gpu-check | tail -20
-```
+파드가 `Pending` 에서 안 움직이면:
 
 | Events 메시지 | 원인 |
 |---|---|
-| `Insufficient nvidia.com/gpu` | device plugin이 자원을 등록 못 함 → 7.2의 1) 2) |
+| `Insufficient nvidia.com/gpu` | device plugin 이 자원 등록 실패 -> 7.4 |
 | `had untolerated taint {nvidia.com/gpu: present}` | `tolerations` 빠짐 |
 | `didn't match Pod's node affinity/selector` | 라벨 오타 (6.1절) |
 | `ImagePullBackOff` | DNS 또는 certs.d (1.2 / 3.4절) |
+
+`nvidia-operator-validator` 가 `Init:CrashLoopBackOff` 면 호스트 드라이버나
+toolkit 을 못 찾은 것이다. 3.3절의 `imports` 와 nvidia 런타임 등록부터 다시
+본다.
+
+### 7.6 2026-11-27 실측 - GFD 가 붙인 라벨
+
+operator 가 뜨면 NFD/GFD 가 하드웨어 정보를 전부 노드 라벨로 올린다.
+`nvidia-smi` 를 치지 않고도 cp 에서 사양을 알 수 있다는 뜻이고, 매니페스트의
+`nodeSelector` 를 이 라벨로 쓸 수 있다는 뜻이다.
+
+```bash
+kubectl get node k8s-gpu -o jsonpath='{.metadata.labels}' | tr ',' '\n' | grep nvidia
+```
+
+| 라벨 | 값 | 읽는 법 |
+|---|---|---|
+| `nvidia.com/gpu.product` | `NVIDIA-H100-NVL` | |
+| `nvidia.com/gpu.memory` | `95830` (MiB) | 94GB |
+| `nvidia.com/gpu.family` | `hopper` | |
+| `nvidia.com/gpu.compute.major/minor` | `9` / `0` | compute capability 9.0 |
+| `nvidia.com/cuda.driver-version.full` | `570.211.01` | cu126 요구치 550.54.14 충족 |
+| `nvidia.com/cuda.runtime-version.full` | `12.8` | 드라이버가 받아 줄 **최대** 런타임 |
+| `nvidia.com/gpu.machine` | `OpenStack-Compute` | |
+| **`nvidia.com/mig.capable`** | **`true`** | **MIG 분할 가능 (2.4절)** |
+| `nvidia.com/mig.config` | `all-disabled` | 아직 안 나눔 |
+| `nvidia.com/mig.config.state` | `success` | MIG Manager 정상 |
+| `nvidia.com/mig.strategy` | `single` | 기본값 |
+| `nvidia.com/gpu.sharing-strategy` | `none` | 아직 분할 안 함 |
+| `nvidia.com/vgpu.present` | `false` | **passthrough 확정** |
+| `nvidia.com/mps.capable` | `false` | 현재 설정 기준. MPS 를 쓰려면 device plugin 설정 필요 |
+
+`vgpu.present=false` + `mig.capable=true` 가 0.1절에서 `lspci` 로 추정했던
+"passthrough 라서 MIG 가능" 을 확정해 준다.
+
+### 7.7 설치 결과 (2026-11-27)
+
+```
+helm chart   nvidia/gpu-operator v26.7.3
+옵션         driver.enabled=false, toolkit.enabled=false
+```
+
+GPU 노드에 뜬 파드:
+
+```
+gpu-feature-discovery-xxxxx                  1/1  Running
+nvidia-dcgm-exporter-xxxxx                   1/1  Running
+nvidia-device-plugin-daemonset-xxxxx         1/1  Running
+nvidia-mig-manager-xxxxx                     1/1  Running
+nvidia-operator-validator-xxxxx              1/1  Running
+nvidia-cuda-validator-xxxxx                  0/1  Completed
+```
+
+전 노드에 `gpu-operator-node-feature-discovery-worker-*` 가 뜬다(NFD 는 GPU 가
+없는 노드에도 올라가서 하드웨어를 식별한다). 의도대로 `nvidia-driver-daemonset`
+과 `nvidia-container-toolkit-daemonset` 은 **없다.**
+
+`nvidia-cuda-validator` 가 `Completed` 면 operator 가 이미 CUDA 워크로드를
+한 번 돌려 통과시킨 것이다. 사실상 검증이 끝난 상태다.
+
+> **호스트 DCGM 을 껐다.** 이미지에 들어 있던 `nv-hostengine` 이
+> `127.0.0.1:5555` 를 잡고 있어서 operator 쪽과 겹친다. 끈 뒤에도
+> `nvidia-smi` 는 그대로 동작한다 - 그쪽은 DCGM 이 아니라 드라이버(NVML)에
+> 직접 묻기 때문이다. 되돌리려면 `sudo systemctl enable --now nvidia-dcgm`.
+>
+> 회사 인프라의 호스트 모니터링이 이 DCGM 을 쓰고 있다면 끄면 안 된다.
+> `ss -ltnp | grep -E '9400|9100'` 로 소비자가 있는지 먼저 본다. 그 경우에는
+> `--set dcgm.enabled=false` 와 `DCGM_REMOTE_HOSTENGINE_INFO=localhost:5555`
+> 로 호스트 것을 쓰게 한다.
+
+### 7.8 DCGM 지표 확인
+
+ROADMAP 2.5절(GPU 사용률 수집)의 기반이 이미 선 상태다. Prometheus 만 붙이면
+된다.
+
+```bash
+kubectl -n gpu-operator get svc nvidia-dcgm-exporter
+kubectl -n gpu-operator exec ds/nvidia-dcgm-exporter -- \
+  curl -s localhost:9400/metrics | grep -E 'DCGM_FI_DEV_GPU_UTIL|DCGM_FI_DEV_FB_USED' | head
+```
+
+| 지표 | 뜻 |
+|---|---|
+| `DCGM_FI_DEV_GPU_UTIL` | SM 사용률(%) |
+| `DCGM_FI_DEV_FB_USED` | 프레임버퍼 사용량(MiB) |
+| `DCGM_FI_DEV_SM_CLOCK` | SM 클럭 |
+| `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | 텐서 코어 활성 비율 |
+
+마지막 것이 중요하다. **GPU 사용률(`GPU_UTIL`)은 "커널이 돌고 있나"만 보므로
+작은 커널 하나만 돌아도 100%로 보인다.** 분할 실험에서 실제로 얼마나 쓰고
+있는지는 `PIPE_TENSOR_ACTIVE` 쪽을 같이 봐야 한다.
 
 ---
 
@@ -637,7 +792,8 @@ GPU 노드에 올려도 CPU로 추론한다. 다음 문서(`gpu-workload.md`)에
 5. 같은 영수증으로 CPU vs H100 측정
 
 그 다음이 ROADMAP 2.4절 — **GPU 분할(MIG / time-slicing)로 파드 수를 늘리는
-실험.** 0.1절에서 passthrough로 확인됐다면 MIG까지 간다.
+실험.** operator 의 MIG Manager 와 DCGM Exporter 가 이미 떠 있으므로 라벨과
+ConfigMap 조작만 남는다. 0.1절에서 passthrough로 확인됐다면 MIG까지 간다.
 
 ---
 
