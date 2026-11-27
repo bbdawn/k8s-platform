@@ -173,23 +173,37 @@ def main() -> int:
         # 진행 표시. CPU 로 돌리면 한 건에 수 초가 걸려서 50건이 5분을 넘는데,
         # 아무것도 찍히지 않으면 멈춘 것과 구별할 수 없다. 실제로 그렇게 보였다.
         # stderr 로 내보내므로 stdout 을 파일로 리다이렉트해도 결과만 깔끔하게 남는다.
+        #
+        # 별도 스레드로 돌린다. 처음에는 메인 스레드에서 1초마다 살아 있는지
+        # 확인하는 루프로 만들었는데, 그러면 마지막 확인과 실제 종료 사이의
+        # 최대 1초가 소요 시간에 그대로 들어간다. 실제로 네 수준이 모두
+        # "7.00s / 14.28 req/s" 로 나와서 포화된 것처럼 보였다. 처리량은 이
+        # 벤치마크의 대표 숫자라 그 양자화가 결론을 바꾼다.
+        stop_progress = threading.Event()
+        progress_thread = None
         if show_progress and sys.stderr.isatty():
-            while any(t.is_alive() for t in threads):
-                done = len(results)
-                el = time.perf_counter() - t0
-                rate = done / el if el > 0 else 0
-                eta = (total - done) / rate if rate > 0 else float("nan")
-                sys.stderr.write(
-                    f"\r  진행 {done:>4}/{total}  경과 {el:6.1f}s  "
-                    f"속도 {rate:5.2f} req/s  남은 시간 ~{eta:5.0f}s   "
-                )
+            def _progress() -> None:
+                while not stop_progress.is_set():
+                    done = len(results)
+                    el = time.perf_counter() - t0
+                    rate = done / el if el > 0 else 0
+                    eta = (total - done) / rate if rate > 0 else float("nan")
+                    sys.stderr.write(
+                        f"\r  진행 {done:>4}/{total}  경과 {el:6.1f}s  "
+                        f"속도 {rate:5.2f} req/s  남은 시간 ~{eta:5.0f}s   "
+                    )
+                    sys.stderr.flush()
+                    stop_progress.wait(0.5)
+                sys.stderr.write("\r" + " " * 78 + "\r")
                 sys.stderr.flush()
-                time.sleep(1.0)
-            sys.stderr.write("\r" + " " * 78 + "\r")
-            sys.stderr.flush()
+            progress_thread = threading.Thread(target=_progress, daemon=True)
+            progress_thread.start()
 
         for t in threads:
             t.join()
+        stop_progress.set()
+        if progress_thread is not None:
+            progress_thread.join(timeout=2)
         for r in results:
             r["_wall"] = time.perf_counter() - t0
         return results
