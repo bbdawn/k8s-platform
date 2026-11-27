@@ -139,18 +139,21 @@ class GpuSampler(threading.Thread):
         self.url = url
         self.interval = interval
         self.samples: list[dict[str, float]] = []
-        self._stop = threading.Event()
+        # 이름을 _stop 으로 두면 안 된다. threading.Thread 에 같은 이름의 내부
+        # 메서드가 있어서 덮어쓰게 되고, join() 이 그것을 호출하는 순간
+        # TypeError: 'Event' object is not callable 로 죽는다.
+        self._done = threading.Event()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._done.is_set():
             s = scrape_gpu(self.url)
             if s:
                 s["_t"] = time.time()
                 self.samples.append(s)
-            self._stop.wait(self.interval)
+            self._done.wait(self.interval)
 
     def stop(self) -> None:
-        self._stop.set()
+        self._done.set()
 
     def summary(self) -> dict:
         if not self.samples:
