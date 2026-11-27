@@ -47,16 +47,32 @@ HERE = Path(__file__).resolve().parent
 
 # DCGM Exporter 가 내보내는 것 중 이 벤치마크에서 의미 있는 것들.
 # 없으면 조용히 건너뛴다 - 설치 버전에 따라 PROF_ 계열이 빠져 있을 수 있다.
+# 이름이 exporter 버전마다 다르다. 이 클러스터의 4.x 는 _RATIO/_BYTES 처럼
+# 단위 접미사를 붙이고, 예전 이름은 접미사가 없다. 양쪽을 모두 받아 둔다.
+# 실제로 확인한 결과 이 설치본에는 SM_ACTIVE 와 SM_OCCUPANCY 가 없다.
+# 그래서 포화 판단은 DRAM/TENSOR 사용률과 FB_USED 로 한다 - 활성(GR_ENGINE)은
+# 높은데 그 둘이 낮으면, GPU 는 쉬지 않지만 단위 시간당 하는 일이 거의 없다는 뜻이다.
 GPU_METRICS = {
+    # 활성 - "커널이 돌고 있다". 포화가 아니다.
     "DCGM_FI_DEV_GPU_UTIL": "gpu_util",
-    "DCGM_FI_PROF_GR_ENGINE_ACTIVE": "gr_engine_active",
+    "DCGM_FI_DEV_GPU_UTIL_RATIO": "gpu_util",
+    "DCGM_FI_PROF_GR_ENGINE_ACTIVE": "gr_engine",
+    "DCGM_FI_PROF_GR_ENGINE_UTIL_RATIO": "gr_engine",
+    # 포화 신호
     "DCGM_FI_PROF_SM_ACTIVE": "sm_active",
     "DCGM_FI_PROF_SM_OCCUPANCY": "sm_occupancy",
-    "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE": "tensor_active",
-    "DCGM_FI_PROF_DRAM_ACTIVE": "dram_active",
-    "DCGM_FI_DEV_FB_USED": "fb_used_mib",
+    "DCGM_FI_PROF_PIPE_TENSOR_ACTIVE": "tensor",
+    "DCGM_FI_PROF_TENSOR_UTIL_RATIO": "tensor",
+    "DCGM_FI_PROF_DRAM_ACTIVE": "dram",
+    "DCGM_FI_PROF_DRAM_UTIL_RATIO": "dram",
+    # 그 외
+    "DCGM_FI_DEV_FB_USED": "fb_used",
+    "DCGM_FI_DEV_FB_USED_BYTES": "fb_used",
     "DCGM_FI_DEV_POWER_USAGE": "power_w",
-    "DCGM_FI_DEV_SM_CLOCK": "sm_clock_mhz",
+    "DCGM_FI_DEV_BOARD_POWER_WATTS": "power_w",
+    "DCGM_FI_DEV_SM_CLOCK": "sm_clock",
+    "DCGM_FI_DEV_SM_CLOCK_HERTZ": "sm_clock",
+    "DCGM_FI_DEV_MEMORY_UTIL_RATIO": "mem_util",
 }
 
 METRIC_LINE = re.compile(r"^(DCGM_FI_[A-Z0-9_]+)\{[^}]*\}\s+([0-9.eE+-]+)\s*$")
@@ -259,8 +275,8 @@ def run_level(args, level: int, gpu_url: str | None, ns: str, selector: str) -> 
     c = rec["cpu"]
     if g.get("samples"):
         bits = []
-        for k, lbl in (("gpu_util", "GPU-Util"), ("sm_active", "SM-Active"),
-                       ("sm_occupancy", "SM-Occupancy"), ("tensor_active", "Tensor")):
+        for k, lbl in (("gpu_util", "GPU-Util"), ("gr_engine", "GR-Engine"),
+                       ("sm_occupancy", "SM-Occ"), ("dram", "DRAM"), ("tensor", "Tensor")):
             if k in g:
                 bits.append(f"{lbl} 평균 {g[k]['mean']:.1f} / 최대 {g[k]['max']:.1f}")
         if bits:
@@ -299,9 +315,9 @@ def main() -> int:
                 have = sorted(probe)
                 print(f"DCGM    {gpu_url}")
                 print(f"        수집 가능: {', '.join(have)}")
-                if "sm_occupancy" not in probe:
-                    print("        주의: SM_OCCUPANCY 가 없다. DCGM Exporter 의 "
-                          "counters 설정에 PROF 계열이 빠져 있다.")
+                if "sm_occupancy" not in probe and "sm_active" not in probe:
+                    print("        주의: SM_OCCUPANCY/SM_ACTIVE 가 없다. 포화 판단은 "
+                          "DRAM/Tensor 사용률과 FB_USED 로 한다.")
             else:
                 print(f"DCGM    {gpu_url} 에서 읽지 못했다. GPU 수집은 건너뛴다.")
                 gpu_url = None
@@ -323,7 +339,7 @@ def main() -> int:
     print(f"\n{'='*66}")
     print("  요약")
     print(f"{'='*66}")
-    header = f"{'동시성':>5} {'처리량':>10} {'추론p50':>9} {'왕복p50':>9} {'왕복p95':>9} {'밖몫%':>7} {'GPU-Util':>9} {'SM-Occ':>7} {'CPU코어':>8} {'throttle':>9}"
+    header = f"{'동시성':>5} {'처리량':>10} {'추론p50':>9} {'왕복p50':>9} {'왕복p95':>9} {'밖몫%':>7} {'GR-Eng':>7} {'DRAM':>7} {'Tensor':>7} {'CPU코어':>8} {'throttle':>9}"
     print(header)
     base = None
     for r in records:
@@ -343,14 +359,14 @@ def main() -> int:
             return f"{v:>{w}.{d}f}" if isinstance(v, (int, float)) else f"{'-':>{w}}"
         print(
             f"{r['concurrency']:>5} {f(rps,10,2)} {f(srv,9)} {f(rtt,9)} {f(r95,9)} "
-            f"{f(over,7)} {f(g.get('gpu_util',{}).get('mean'),9)} "
-            f"{f(g.get('sm_occupancy',{}).get('mean'),7,2)} "
+            f"{f(over,7)} {f(g.get('gr_engine',{}).get('mean'),7,3)} "
+            f"{f(g.get('dram',{}).get('mean'),7,3)} {f(g.get('tensor',{}).get('mean'),7,3)} "
             f"{f(c.get('cores_used'),8,2)} {str(c.get('throttled_count','-')):>9}"
         )
     if base:
         print()
         print("  선형이면 동시성 2배마다 처리량도 2배다. 꺾이는 지점이 포화점이고,")
-        print("  그때 GPU-Util/SM-Occ 와 CPU코어/throttle 중 어느 쪽이 한계에 붙어")
+        print("  그때 DRAM/Tensor 와 CPU코어/throttle 중 어느 쪽이 한계에 붙어")
         print("  있는지가 '무엇이 막았는가'의 답이다.")
     print(f"\n저장    {path}")
     return 0
